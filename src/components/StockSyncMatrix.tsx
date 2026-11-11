@@ -118,39 +118,39 @@ export const StockSyncMatrix: React.FC<StockSyncMatrixProps> = ({
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-slate-200 bg-white px-4 rounded-t-2xl gap-2 pt-2">
+      <div className="flex overflow-x-auto border-b border-slate-200 bg-white px-2 sm:px-4 rounded-t-2xl gap-1 sm:gap-2 pt-2">
         <button
           onClick={() => setActiveTab('matrix')}
-          className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold border-b-2 transition ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 text-xs font-bold border-b-2 transition whitespace-nowrap shrink-0 ${
             activeTab === 'matrix'
               ? 'border-indigo-600 text-indigo-600'
               : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
-          <Building2 className="w-4 h-4" />
-          Stock Levels Matrix
+          <Building2 className="w-4 h-4 shrink-0" />
+          <span>Stock Levels Matrix</span>
         </button>
         <button
           onClick={() => setActiveTab('transfers')}
-          className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold border-b-2 transition ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 text-xs font-bold border-b-2 transition whitespace-nowrap shrink-0 ${
             activeTab === 'transfers'
               ? 'border-indigo-600 text-indigo-600'
               : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
-          <ArrowRightLeft className="w-4 h-4" />
-          Transfer History ({transfers.length})
+          <ArrowRightLeft className="w-4 h-4 shrink-0" />
+          <span>Transfer History ({transfers.length})</span>
         </button>
         <button
           onClick={() => setActiveTab('audit')}
-          className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold border-b-2 transition ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 text-xs font-bold border-b-2 transition whitespace-nowrap shrink-0 ${
             activeTab === 'audit'
               ? 'border-indigo-600 text-indigo-600'
               : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
-          <History className="w-4 h-4" />
-          Stock Adjustment Audit Log ({adjustments.length})
+          <History className="w-4 h-4 shrink-0" />
+          <span>Stock Adjustment Audit Log ({adjustments.length})</span>
         </button>
       </div>
 
@@ -370,9 +370,9 @@ export const StockSyncMatrix: React.FC<StockSyncMatrixProps> = ({
 
       {/* Transfer Modal */}
       {transferModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
-            <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-hidden border border-slate-200 flex flex-col my-auto">
+            <div className="px-5 py-3.5 sm:py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
               <h3 className="font-bold text-sm text-white flex items-center gap-2">
                 <ArrowRightLeft className="w-4 h-4 text-indigo-400" />
                 Inter-Store Inventory Transfer
@@ -385,7 +385,7 @@ export const StockSyncMatrix: React.FC<StockSyncMatrixProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleExecuteTransfer} className="p-5 space-y-4">
+            <form onSubmit={handleExecuteTransfer} className="p-4 sm:p-5 space-y-4 overflow-y-auto flex-1">
               {transferSuccess && (
                 <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-semibold flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600" />

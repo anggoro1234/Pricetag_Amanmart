@@ -76,9 +76,9 @@ export const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+        <div className="flex-1 overflow-y-auto md:overflow-hidden flex flex-col md:flex-row">
           {/* Left: Settings Controls */}
-          <div className="w-full md:w-1/2 p-6 overflow-y-auto space-y-5 border-r border-slate-200">
+          <div className="w-full md:w-1/2 p-4 sm:p-6 md:overflow-y-auto space-y-5 border-b md:border-b-0 md:border-r border-slate-200">
             {/* Template Selector */}
             <div>
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">

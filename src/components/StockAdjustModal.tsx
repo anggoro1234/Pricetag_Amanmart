@@ -37,9 +37,9 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
-        <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-hidden border border-slate-200 flex flex-col my-auto">
+        <div className="px-5 py-3.5 sm:py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
           <h3 className="font-bold text-sm text-white flex items-center gap-2">
             <ArrowUpDown className="w-4 h-4 text-blue-400" />
             Adjust Inventory Stock
@@ -49,7 +49,7 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
+        <form onSubmit={handleSubmit} className="p-4 sm:p-5 space-y-4 text-xs overflow-y-auto flex-1">
           <div>
             <div className="text-xs font-bold text-slate-800">{product.name}</div>
             <div className="text-[11px] text-slate-500 font-mono">

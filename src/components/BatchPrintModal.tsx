@@ -364,7 +364,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         </div>
 
         {/* Modal Main Content: 3-Column Layout (1: Catalog/Category Picker, 2: Active Batch Queue, 3: Live Print Preview) */}
-        <div className="flex-1 overflow-hidden flex flex-col lg:flex-row">
+        <div className="flex-1 overflow-y-auto lg:overflow-hidden flex flex-col lg:flex-row">
           {/* Column 1: Multi-Category Product Picker (Drag & Drop Source) */}
           <div className="w-full lg:w-64 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white flex flex-col overflow-hidden max-h-60 lg:max-h-none flex-shrink-0">
             <div className="p-3 border-b border-slate-200 bg-emerald-50/60 space-y-2">

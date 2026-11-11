@@ -294,10 +294,10 @@ export default function App() {
       )}
 
       {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6">
         {/* Amanmart Official Brand Header Box */}
         <div 
-          className="rounded-2xl text-white shadow-xs overflow-hidden relative px-5 py-4 sm:px-6 sm:py-4.5 border border-emerald-800/40"
+          className="rounded-2xl text-white shadow-xs overflow-hidden relative px-4 py-4 sm:px-6 sm:py-4.5 border border-emerald-800/40"
           style={{
             background: 'linear-gradient(135deg, #092c1a 0%, #0d3b23 55%, #124d2e 100%)',
           }}
@@ -308,9 +308,7 @@ export default function App() {
           <div className="flex flex-col md:flex-row items-center justify-between gap-4 relative z-10">
             {/* Logo positioned proportionally with store context */}
             <div className="flex flex-col sm:flex-row items-center gap-3.5 sm:gap-4 text-center sm:text-left">
-              <div className="p-2 sm:p-2.5 rounded-xl bg-black/25 backdrop-blur-xs border border-emerald-700/50 shadow-inner flex-shrink-0">
-                <AmanmartLogo size="md" theme="dark" showTagline={true} />
-              </div>
+              <AmanmartLogo size="md" theme="dark" showTagline={true} />
 
               <div>
                 <div className="flex items-center justify-center sm:justify-start gap-2 flex-wrap">
@@ -331,10 +329,10 @@ export default function App() {
             </div>
 
             {/* Header Action Buttons */}
-            <div className="flex items-center gap-2.5 z-10 flex-wrap justify-center flex-shrink-0">
+            <div className="flex items-center gap-2 sm:gap-2.5 z-10 flex-wrap justify-center w-full sm:w-auto flex-shrink-0">
               <button
                 onClick={() => setScannerOpen(true)}
-                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-100 border border-emerald-700/60 rounded-xl text-xs font-semibold transition active:scale-95"
+                className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3.5 py-2 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-100 border border-emerald-700/60 rounded-xl text-xs font-semibold transition active:scale-95"
               >
                 <BarcodeIcon className="w-4 h-4 text-[#62cb32]" />
                 Scan Barcode
@@ -342,7 +340,7 @@ export default function App() {
 
               <button
                 onClick={() => setProductImportOpen(true)}
-                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md shadow-black/20 transition active:scale-95 border border-emerald-400/30"
+                className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md shadow-black/20 transition active:scale-95 border border-emerald-400/30"
               >
                 <Upload className="w-4 h-4" />
                 Import Items
@@ -352,41 +350,41 @@ export default function App() {
         </div>
 
         {/* Primary View Navigation Tabs in Soft Green Theme */}
-        <div className="flex border-b border-emerald-200/80 bg-white px-4 rounded-t-2xl shadow-xs gap-3 pt-2">
+        <div className="flex overflow-x-auto border-b border-emerald-200/80 bg-white px-2 sm:px-4 rounded-t-2xl shadow-xs gap-1 sm:gap-3 pt-2">
           <button
             onClick={() => setActiveTab('catalog')}
-            className={`flex items-center gap-2 px-4 py-3 text-xs sm:text-sm font-bold border-b-2 transition ${
+            className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm font-bold border-b-2 transition whitespace-nowrap shrink-0 ${
               activeTab === 'catalog'
-                ? 'border-emerald-700 text-emerald-800 bg-emerald-50/50'
+                ? 'border-emerald-700 text-emerald-800 bg-emerald-50/50 rounded-t-lg'
                 : 'border-transparent text-slate-500 hover:text-emerald-800'
             }`}
           >
-            <BarcodeIcon className="w-4 h-4" />
-            Product Catalog &amp; Label Printing ({products.length})
+            <BarcodeIcon className="w-4 h-4 shrink-0" />
+            <span>Product Catalog &amp; Label Printing ({products.length})</span>
           </button>
 
           <button
             onClick={() => setActiveTab('sync_matrix')}
-            className={`flex items-center gap-2 px-4 py-3 text-xs sm:text-sm font-bold border-b-2 transition ${
+            className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm font-bold border-b-2 transition whitespace-nowrap shrink-0 ${
               activeTab === 'sync_matrix'
-                ? 'border-emerald-700 text-emerald-800 bg-emerald-50/50'
+                ? 'border-emerald-700 text-emerald-800 bg-emerald-50/50 rounded-t-lg'
                 : 'border-transparent text-slate-500 hover:text-emerald-800'
             }`}
           >
-            <Building2 className="w-4 h-4" />
-            Multi-Store Real-Time Cloud Sync ({stores.length} Branches)
+            <Building2 className="w-4 h-4 shrink-0" />
+            <span>Multi-Store Real-Time Cloud Sync ({stores.length} Branches)</span>
           </button>
 
           <button
             onClick={() => setActiveTab('analytics')}
-            className={`flex items-center gap-2 px-4 py-3 text-xs sm:text-sm font-bold border-b-2 transition ${
+            className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm font-bold border-b-2 transition whitespace-nowrap shrink-0 ${
               activeTab === 'analytics'
-                ? 'border-emerald-700 text-emerald-800 bg-emerald-50/50'
+                ? 'border-emerald-700 text-emerald-800 bg-emerald-50/50 rounded-t-lg'
                 : 'border-transparent text-slate-500 hover:text-emerald-800'
             }`}
           >
-            <BarChart3 className="w-4 h-4" />
-            Inventory Analytics &amp; Reports
+            <BarChart3 className="w-4 h-4 shrink-0" />
+            <span>Inventory Analytics &amp; Reports</span>
           </button>
         </div>
 
