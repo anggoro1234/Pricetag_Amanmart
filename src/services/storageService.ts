@@ -28,6 +28,130 @@ const STORAGE_KEYS = {
   SIMULATED_OFFLINE: 'aman_label_simulated_offline_v1',
 };
 
+// Generate a valid 13-digit EAN-13 barcode (deterministic if seed such as SKU/name is given)
+export const generateValidEan13 = (seed?: string): string => {
+  let digits9 = '';
+  if (seed && seed.trim().length > 0) {
+    const cleanNum = seed.replace(/[^0-9]/g, '');
+    if (cleanNum.length >= 4 && cleanNum.length <= 9) {
+      digits9 = cleanNum.padStart(9, '0');
+    } else {
+      // Hash string deterministically into 9 digits
+      let hash = 2166136261;
+      for (let i = 0; i < seed.length; i++) {
+        hash ^= seed.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      digits9 = (Math.abs(hash) % 900000000 + 100000000).toString().slice(0, 9);
+    }
+  } else {
+    digits9 = Math.floor(100000000 + Math.random() * 900000000).toString();
+  }
+
+  const raw12 = ('899' + digits9).slice(0, 12);
+  let sum = 0;
+  for (let i = 0; i < 12; i++) {
+    const n = parseInt(raw12[i], 10) || 0;
+    sum += i % 2 === 0 ? n : n * 3;
+  }
+  const check = (10 - (sum % 10)) % 10;
+  return raw12 + check.toString();
+};
+
+// Ensure an EAN-13 barcode has a valid check digit, or clean/repair corrupted barcodes
+export const sanitizeBarcodeValue = (rawBarcode?: string, fallbackSeed?: string): string => {
+  if (!rawBarcode) return generateValidEan13(fallbackSeed);
+
+  let clean = rawBarcode
+    .trim()
+    .replace(/^=+/, '')
+    .replace(/^['"]+|['"]+$/g, '')
+    .replace(/\s+/g, '');
+
+  if (!clean || clean === '-' || clean === '0' || clean.toLowerCase() === 'nan') {
+    return generateValidEan13(fallbackSeed);
+  }
+
+  // Handle scientific notation with dot or comma e.g. 8.99E+12 or 8,99E+12 or 9E+12
+  if (/^[0-9]+([.,][0-9]+)?e\+[0-9]+$/i.test(clean)) {
+    const num = Number(clean.replace(',', '.'));
+    if (!isNaN(num) && isFinite(num)) {
+      clean = num.toFixed(0);
+    }
+  }
+
+  // Detect corrupted barcodes:
+  // 1. Short numeric fragments (< 5 digits, e.g. "658", "843", "000" from split decimal stock)
+  // 2. Scientific notation precision loss (12-13 digits ending in 6 or more zeros e.g. 8990000000000 or 9000000000000)
+  // 3. Contains semicolons or invalid characters
+  const isShortFragment = clean.length < 5;
+  const isSciNotationPrecisionLoss = /^[0-9]{11,14}$/.test(clean) && /0{6,}$/.test(clean);
+  const hasCorruptChars = clean.includes(';');
+
+  if (isShortFragment || isSciNotationPrecisionLoss || hasCorruptChars) {
+    return generateValidEan13(fallbackSeed);
+  }
+
+  // If 12 numeric digits, compute the 13th EAN-13 check digit
+  if (/^[0-9]{12}$/.test(clean)) {
+    let sum = 0;
+    for (let i = 0; i < 12; i++) {
+      const n = parseInt(clean[i], 10);
+      sum += i % 2 === 0 ? n : n * 3;
+    }
+    const check = (10 - (sum % 10)) % 10;
+    return clean + check.toString();
+  }
+
+  // If 13 numeric digits, fix the last check digit if invalid so JsBarcode EAN13 never fails
+  if (/^[0-9]{13}$/.test(clean)) {
+    const raw12 = clean.slice(0, 12);
+    let sum = 0;
+    for (let i = 0; i < 12; i++) {
+      const n = parseInt(raw12[i], 10);
+      sum += i % 2 === 0 ? n : n * 3;
+    }
+    const check = (10 - (sum % 10)) % 10;
+    return raw12 + check.toString();
+  }
+
+  return clean;
+};
+
+// Normalize category names so "FRESH" and "Fresh" don't create duplicate categories
+export const normalizeCategoryName = (raw?: string): string => {
+  if (!raw || !raw.trim()) return 'Grocery';
+  const clean = raw.trim().replace(/^['";]+|['";]+$/g, '').trim();
+  if (!clean) return 'Grocery';
+
+  const upper = clean.toUpperCase();
+  const map: Record<string, string> = {
+    FRESH: 'Fresh',
+    GROCERY: 'Grocery',
+    SEMBAKO: 'Grocery',
+    BEVERAGES: 'Beverages',
+    MINUMAN: 'Beverages',
+    SNACKS: 'Snacks',
+    SNACK: 'Snacks',
+    'INSTANT FOOD': 'Instant Food',
+    'MIE INSTAN': 'Instant Food',
+    'PERSONAL CARE': 'Personal Care',
+    BAKERY: 'Bakery',
+    ROTI: 'Bakery',
+    'SAUCE & CONDIMENTS': 'Sauce & Condiments',
+  };
+
+  if (map[upper]) return map[upper];
+
+  // Title-case if all uppercase
+  if (clean === upper && clean.length > 2) {
+    return clean
+      .toLowerCase()
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+  return clean;
+};
+
 class StorageService {
   private channel: BroadcastChannel | null = null;
   private listeners: Set<() => void> = new Set();
@@ -84,50 +208,131 @@ class StorageService {
     if (!localStorage.getItem(STORAGE_KEYS.PRODUCTS)) {
       localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(INITIAL_PRODUCTS));
     } else {
-      // Ensure existing products have stocks for all 8 branches & merge any new default products
+      // Ensure existing products have stocks for all 8 branches, repair any corrupted CSV imports, & merge new default products
       try {
         const storedProds: Product[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.PRODUCTS) || '[]');
         let modified = false;
         const todayFormatted = new Date().toLocaleDateString('en-GB');
-        const updatedProds = storedProds.map((p) => {
+        const repairedProds: Product[] = [];
+
+        storedProds.forEach((rawProd) => {
+          let p = { ...rawProd };
           let pModified = false;
+
+          // Auto-repair products corrupted by semicolon CSV split on decimal comma
+          // e.g. name = "BONELESS PAHA FZ/ KG;;56500;50007;FRESH;44" and barcode = "658"
+          if (p.name && p.name.includes(';')) {
+            const semiParts = p.name.split(';').map((s) => s.trim());
+            if (semiParts.length >= 3) {
+              const extractedName = semiParts[0].replace(/^["']+|["']+$/g, '').trim();
+              const extractedBarcode = semiParts[1] || '';
+              const extractedPrice = parseInt((semiParts[2] || '').replace(/[^0-9]/g, ''), 10);
+              const extractedSku = semiParts[3] || p.sku;
+              const extractedCategory = semiParts[4] ? normalizeCategoryName(semiParts[4]) : p.category;
+              const extractedStockRaw = semiParts[5];
+
+              if (extractedName) {
+                p.name = extractedName.toUpperCase();
+                if (extractedSku) p.sku = extractedSku.trim();
+                if (extractedCategory) {
+                  p.category = extractedCategory;
+                  p.department = `${extractedCategory} / General`;
+                }
+                if (!isNaN(extractedPrice) && extractedPrice >= 0) {
+                  p.pricing = {
+                    ...p.pricing,
+                    unitPrice: extractedPrice,
+                    bulkPrice: extractedPrice > 0 ? Math.round(extractedPrice * 22) : 0,
+                  };
+                }
+                p.barcode = sanitizeBarcodeValue(extractedBarcode, p.sku || p.name);
+
+                if (extractedStockRaw !== undefined && extractedStockRaw !== '') {
+                  const parsedStock = Math.max(0, Math.round(parseFloat(extractedStockRaw.replace(',', '.')) || 0));
+                  const currentStocks = { ...(p.stocks || {}) };
+                  const activeStoreId = 'store-krg';
+                  currentStocks[activeStoreId] = {
+                    storeId: activeStoreId,
+                    quantity: parsedStock,
+                    minThreshold: currentStocks[activeStoreId]?.minThreshold ?? 20,
+                    lastUpdated: new Date().toISOString(),
+                  };
+                  p.stocks = currentStocks;
+                }
+                pModified = true;
+              }
+            }
+          }
+
+          // Ensure barcode is clean and valid (fixes short fragments like "658" or "8.99E+12" / "9000000000000")
+          const cleanBc = sanitizeBarcodeValue(p.barcode, p.sku || p.name);
+          if (cleanBc !== p.barcode) {
+            p.barcode = cleanBc;
+            pModified = true;
+          }
+
+          // Normalize category name (e.g., "FRESH" -> "Fresh")
+          const cleanCat = normalizeCategoryName(p.category);
+          if (cleanCat !== p.category) {
+            p.category = cleanCat;
+            pModified = true;
+          }
+
           const currentStocks = { ...(p.stocks || {}) };
           INITIAL_STORES.forEach((store) => {
             if (!currentStocks[store.id]) {
               pModified = true;
-              // Fallback to old store stock if available
               const legacyStock = currentStocks['store-1'] || currentStocks['store-2'] || currentStocks['store-3'];
               currentStocks[store.id] = {
                 storeId: store.id,
-                quantity: legacyStock?.quantity ?? 35,
+                quantity: Math.max(0, legacyStock?.quantity ?? 35),
                 minThreshold: legacyStock?.minThreshold ?? 20,
                 lastUpdated: new Date().toISOString(),
               };
+            } else if (currentStocks[store.id].quantity < 0 || isNaN(currentStocks[store.id].quantity)) {
+              currentStocks[store.id] = {
+                ...currentStocks[store.id],
+                quantity: Math.max(0, currentStocks[store.id].quantity || 0),
+              };
+              pModified = true;
             }
           });
+
           if (p.dateEffective !== todayFormatted) {
             pModified = true;
           }
+
           if (pModified) {
             modified = true;
-            return { ...p, stocks: currentStocks, dateEffective: todayFormatted };
+            p = { ...p, stocks: currentStocks, dateEffective: todayFormatted };
           }
-          return p;
+
+          // Deduplicate if repaired SKU/name already exists in repairedProds
+          const dupIdx = repairedProds.findIndex(
+            (existing) =>
+              (p.sku && existing.sku.toLowerCase() === p.sku.toLowerCase()) ||
+              (p.barcode && existing.barcode.toLowerCase() === p.barcode.toLowerCase())
+          );
+          if (dupIdx === -1) {
+            repairedProds.push(p);
+          } else {
+            modified = true;
+          }
         });
 
         // Merge any newly added default products (e.g. Sauce & Condiments) not yet in localStorage
         INITIAL_PRODUCTS.forEach((initProd) => {
-          const exists = updatedProds.some(
+          const exists = repairedProds.some(
             (p) => p.id === initProd.id || p.sku === initProd.sku || p.barcode === initProd.barcode
           );
           if (!exists) {
-            updatedProds.push(initProd);
+            repairedProds.push(initProd);
             modified = true;
           }
         });
 
         if (modified) {
-          localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(updatedProds));
+          localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(repairedProds));
         }
       } catch {}
     }
@@ -613,55 +818,85 @@ class StorageService {
     let added = 0;
     let updated = 0;
 
-    // Helper to generate valid EAN-13 barcode if omitted
-    const generateEan13 = () => {
-      const raw12 = '899' + Math.floor(100000000 + Math.random() * 900000000).toString();
-      let sum = 0;
-      for (let i = 0; i < 12; i++) {
-        const n = parseInt(raw12[i]);
-        sum += i % 2 === 0 ? n : n * 3;
-      }
-      const check = (10 - (sum % 10)) % 10;
-      return raw12 + check.toString();
-    };
-
     records.forEach((rec, idx) => {
-      const cleanName = rec.name ? rec.name.trim() : '';
+      let cleanName = rec.name ? rec.name.trim().replace(/^["']+|["']+$/g, '').trim() : '';
       if (!cleanName) return;
 
-      const cleanBarcode = rec.barcode ? rec.barcode.trim().replace(/\s+/g, '') : generateEan13();
-      const unitPrice = typeof rec.price === 'number' && !isNaN(rec.price) ? Math.max(0, rec.price) : 0;
+      // Extra defensive check: if cleanName accidentally contains semicolon-separated columns, extract them
+      let rawBarcode = rec.barcode ? rec.barcode.trim() : '';
+      let unitPrice = typeof rec.price === 'number' && !isNaN(rec.price) ? Math.max(0, rec.price) : 0;
+      let rawSku = rec.sku ? rec.sku.trim() : '';
+      let rawCategory = rec.category ? rec.category.trim() : '';
+      let rawStock = rec.stock;
 
-      // Check if product already exists by barcode or SKU
+      if (cleanName.includes(';') && cleanName.split(';').length >= 3) {
+        const parts = cleanName.split(';').map((s) => s.trim());
+        cleanName = parts[0] || cleanName;
+        if (parts[1] && !rawBarcode) rawBarcode = parts[1];
+        if (parts[2] && unitPrice === 0) {
+          const parsedP = parseInt(parts[2].replace(/[^0-9]/g, ''), 10);
+          if (!isNaN(parsedP)) unitPrice = parsedP;
+        }
+        if (parts[3] && !rawSku) rawSku = parts[3];
+        if (parts[4] && (!rawCategory || rawCategory === 'Grocery')) rawCategory = parts[4];
+        if (parts[5] !== undefined && parts[5] !== '') {
+          const parsedS = Math.round(parseFloat(parts[5].replace(',', '.')));
+          if (!isNaN(parsedS)) rawStock = Math.max(0, parsedS);
+        }
+      }
+
+      cleanName = cleanName.replace(/;+$/g, '').replace(/\s+/g, ' ').trim();
+      if (!cleanName) return;
+
+      const normalizedCat = normalizeCategoryName(rawCategory);
+      const safeStock = rawStock !== undefined && !isNaN(rawStock) ? Math.max(0, Math.round(rawStock)) : undefined;
+
+      // Check if product already exists by SKU, valid barcode, or exact name
+      const preliminaryBarcode = rawBarcode ? sanitizeBarcodeValue(rawBarcode, rawSku || cleanName) : '';
       const existingIdx = products.findIndex(
         (p) =>
-          (cleanBarcode && p.barcode.toLowerCase() === cleanBarcode.toLowerCase()) ||
-          (rec.sku && p.sku.toLowerCase() === rec.sku.trim().toLowerCase())
+          (rawSku && p.sku.toLowerCase() === rawSku.toLowerCase()) ||
+          (preliminaryBarcode && p.barcode.toLowerCase() === preliminaryBarcode.toLowerCase()) ||
+          p.name.toLowerCase() === cleanName.toLowerCase()
       );
 
       if (existingIdx >= 0) {
         if (updateExisting) {
           const existing = products[existingIdx];
           existing.name = cleanName.toUpperCase();
-          if (unitPrice > 0) existing.pricing.unitPrice = unitPrice;
+          if (rawSku) existing.sku = rawSku;
+          if (rawBarcode && rawBarcode.length >= 5 && !rawBarcode.toUpperCase().includes('E+')) {
+            existing.barcode = sanitizeBarcodeValue(rawBarcode, existing.sku || cleanName);
+          } else if (!existing.barcode || existing.barcode.length < 5) {
+            existing.barcode = sanitizeBarcodeValue(existing.barcode, existing.sku || cleanName);
+          }
+          if (unitPrice >= 0) {
+            existing.pricing.unitPrice = unitPrice;
+            if (!rec.bulkPrice && unitPrice > 0) {
+              existing.pricing.bulkPrice = Math.round(unitPrice * 22);
+            }
+          }
           if (rec.bulkPrice !== undefined && rec.bulkPrice > 0) existing.pricing.bulkPrice = rec.bulkPrice;
           if (rec.bulkQuantity !== undefined && rec.bulkQuantity > 0) existing.pricing.bulkQuantity = rec.bulkQuantity;
           if (rec.bulkLabel) existing.pricing.bulkLabel = rec.bulkLabel.toUpperCase();
-          if (rec.category) existing.category = rec.category;
+          if (rawCategory) {
+            existing.category = normalizedCat;
+            existing.department = `${normalizedCat} / General`;
+          }
           if (rec.brand) existing.brand = rec.brand;
           if (rec.unitLabel) existing.pricing.unitLabel = rec.unitLabel.toUpperCase();
 
           // Update stock for target store if specified
-          if (rec.stock !== undefined && !isNaN(rec.stock)) {
+          if (safeStock !== undefined) {
             if (!existing.stocks[targetStoreId]) {
               existing.stocks[targetStoreId] = {
                 storeId: targetStoreId,
-                quantity: rec.stock,
+                quantity: safeStock,
                 minThreshold: rec.minThreshold ?? 20,
                 lastUpdated: new Date().toISOString(),
               };
             } else {
-              existing.stocks[targetStoreId].quantity = rec.stock;
+              existing.stocks[targetStoreId].quantity = safeStock;
               if (rec.minThreshold !== undefined) existing.stocks[targetStoreId].minThreshold = rec.minThreshold;
               existing.stocks[targetStoreId].lastUpdated = new Date().toISOString();
             }
@@ -670,12 +905,13 @@ class StorageService {
         }
       } else {
         // Create new product
-        const newSku = rec.sku ? rec.sku.trim() : `100${Math.floor(1000 + Math.random() * 9000)}`;
+        const newSku = rawSku || `100${Math.floor(1000 + Math.random() * 9000)}`;
+        const cleanBarcode = sanitizeBarcodeValue(rawBarcode, newSku || cleanName);
         const initialStocks: Record<string, ProductStock> = {};
 
         stores.forEach((store) => {
           const isTarget = store.id === targetStoreId;
-          const qty = isTarget ? (rec.stock !== undefined ? rec.stock : 50) : 35;
+          const qty = isTarget ? (safeStock !== undefined ? safeStock : 50) : 35;
           initialStocks[store.id] = {
             storeId: store.id,
             quantity: qty,
@@ -690,9 +926,9 @@ class StorageService {
           barcode: cleanBarcode,
           barcodeType: 'EAN13',
           name: cleanName.toUpperCase(),
-          category: rec.category || 'Grocery',
+          category: normalizedCat,
           brand: rec.brand || 'General',
-          department: `${rec.category || 'Grocery'} / General`,
+          department: `${normalizedCat} / General`,
           currency: 'Rp.',
           pricing: {
             unitLabel: (rec.unitLabel || 'PCS').toUpperCase(),

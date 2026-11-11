@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import JsBarcode from 'jsbarcode';
 import { Product, LabelTemplateConfig, StoreLocation } from '../types';
+import { sanitizeBarcodeValue } from '../services/storageService';
 
 // Format current live date as DD/MM/YYYY (e.g. 09/11/2026)
 const formatLivePrintDate = (date: Date = new Date()): string => {
@@ -42,12 +43,13 @@ export const LabelPreview: React.FC<LabelPreviewProps> = ({
   // Generate crisp dynamic barcode with JsBarcode
   useEffect(() => {
     if (!barcodeRef.current) return;
+    const safeBarcode = sanitizeBarcodeValue(product.barcode, product.sku || product.name);
     try {
       // Determine barcode format: EAN-13 requires 12 or 13 numeric chars
-      const cleanBarcode = product.barcode.replace(/[^0-9]/g, '');
-      const format = cleanBarcode.length === 12 || cleanBarcode.length === 13 ? 'EAN13' : 'CODE128';
+      const cleanNumeric = safeBarcode.replace(/[^0-9]/g, '');
+      const format = cleanNumeric.length === 12 || cleanNumeric.length === 13 ? 'EAN13' : 'CODE128';
 
-      JsBarcode(barcodeRef.current, product.barcode, {
+      JsBarcode(barcodeRef.current, safeBarcode, {
         format: format,
         width: 1.5 * scale,
         height: (template.barcodeHeightMm || 13) * 2.35 * scale,
@@ -63,21 +65,24 @@ export const LabelPreview: React.FC<LabelPreviewProps> = ({
       // Fallback to Code 128 if EAN checksum fails
       try {
         if (barcodeRef.current) {
-          JsBarcode(barcodeRef.current, product.barcode, {
+          JsBarcode(barcodeRef.current, safeBarcode, {
             format: 'CODE128',
             width: 1.35 * scale,
             height: (template.barcodeHeightMm || 13) * 2.35 * scale,
             displayValue: true,
+            font: 'monospace',
             fontSize: 11 * scale,
             textMargin: 1.5 * scale,
             margin: 1 * scale,
+            background: '#ffffff',
+            lineColor: '#000000',
           });
         }
       } catch {
         // Silent fallback
       }
     }
-  }, [product.barcode, template.barcodeHeightMm, scale]);
+  }, [product.barcode, product.sku, product.name, template.barcodeHeightMm, scale]);
 
   // Dimensions in mm converted to pixel preview for screen fidelity
   // 1 mm ≈ 3.78 px at standard 96 DPI screen

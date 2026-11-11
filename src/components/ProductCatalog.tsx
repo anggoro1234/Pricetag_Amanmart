@@ -132,23 +132,23 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
     }
   };
 
-  // Export Catalog to CSV
+  // Export Catalog to CSV (Excel-safe ";" delimiter and ="barcode" text formula)
   const handleExportCSV = () => {
-    const headers = ['SKU', 'Barcode', 'Name', 'Category', 'Unit_Price', 'Bulk_Price', 'ActiveStore_Stock'];
+    const headers = ['Item Name', 'Barcode', 'Price', 'SKU', 'Category', 'Stock'];
     const rows = products.map((p) => [
-      p.sku,
-      p.barcode,
-      `"${p.name}"`,
-      p.category,
+      `"${p.name.replace(/"/g, '""')}"`,
+      `="${p.barcode}"`,
       p.pricing.unitPrice,
-      p.pricing.bulkPrice || '',
+      p.sku,
+      p.category,
       p.stocks[activeStore.id]?.quantity ?? 0,
     ]);
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
+    const csvBody = '\uFEFF' + [headers.join(';'), ...rows.map((e) => e.join(';'))].join('\r\n');
+    const blob = new Blob([csvBody], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
+    link.setAttribute('href', url);
     link.setAttribute('download', `inventory_catalog_${activeStore.code}.csv`);
     document.body.appendChild(link);
     link.click();
