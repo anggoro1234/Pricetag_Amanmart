@@ -1,0 +1,10 @@
+{
+  "name": "Price Label Printer & Inventory Manager",
+  "description": "Thermal price label printing with barcode scanner integration, multi-location stock synchronization, bulk batch printing, and offline inventory management.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

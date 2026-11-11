@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#1e293b"/>
+  <rect x="96" y="80" width="320" height="352" rx="20" fill="#ffffff"/>
+  <rect x="128" y="112" width="256" height="32" rx="6" fill="#0284c7"/>
+  <rect x="128" y="160" width="160" height="24" rx="4" fill="#dc2626"/>
+  <!-- Barcode -->
+  <line x1="128" y1="210" x2="128" y2="340" stroke="#0f172a" stroke-width="10"/>
+  <line x1="148" y1="210" x2="148" y2="340" stroke="#0f172a" stroke-width="5"/>
+  <line x1="165" y1="210" x2="165" y2="340" stroke="#0f172a" stroke-width="15"/>
+  <line x1="192" y1="210" x2="192" y2="340" stroke="#0f172a" stroke-width="8"/>
+  <line x1="212" y1="210" x2="212" y2="340" stroke="#0f172a" stroke-width="5"/>
+  <line x1="228" y1="210" x2="228" y2="340" stroke="#0f172a" stroke-width="14"/>
+  <line x1="256" y1="210" x2="256" y2="340" stroke="#0f172a" stroke-width="6"/>
+  <line x1="272" y1="210" x2="272" y2="340" stroke="#0f172a" stroke-width="12"/>
+  <line x1="294" y1="210" x2="294" y2="340" stroke="#0f172a" stroke-width="6"/>
+  <line x1="316" y1="210" x2="316" y2="340" stroke="#0f172a" stroke-width="14"/>
+  <line x1="344" y1="210" x2="344" y2="340" stroke="#0f172a" stroke-width="8"/>
+  <line x1="366" y1="210" x2="366" y2="340" stroke="#0f172a" stroke-width="10"/>
+  <text x="256" y="385" font-family="monospace" font-size="32" font-weight="bold" fill="#0f172a" text-anchor="middle">89686010015</text>
+</svg>

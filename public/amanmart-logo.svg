@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 200" width="100%" height="100%">
+  <defs>
+    <linearGradient id="amanmartGreen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#67d434"/>
+      <stop offset="100%" stop-color="#55c128"/>
+    </linearGradient>
+    <filter id="softGlow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Group for Logo -->
+  <g id="amanmart-brand" filter="url(#softGlow)">
+    <!-- Cart Icon -->
+    <g transform="translate(10, 20)">
+      <!-- Top wing / rim & handle -->
+      <path d="M 12 36 L 95 36 C 104 36 110 42 112 50 L 126 50 C 131 50 135 46 135 41 C 135 36 131 32 126 32 L 105 32 C 100 32 95 28 92 23 C 90 19 86 16 80 16 L 12 16 C 6.5 16 2 20.5 2 26 C 2 31.5 6.5 36 12 36 Z" 
+            fill="url(#amanmartGreen)"/>
+      
+      <!-- Middle wing / bar -->
+      <path d="M 22 58 L 86 58 C 91.5 58 96 53.5 96 48 C 96 42.5 91.5 38 86 38 L 22 38 C 16.5 38 12 42.5 12 48 C 12 53.5 16.5 58 22 58 Z" 
+            fill="url(#amanmartGreen)"/>
+      
+      <!-- Bottom basket contour -->
+      <path d="M 30 84 L 98 84 C 109 84 117 76 119 65 L 121 52 C 121 47 117 43 112 43 C 107 43 104 47 103 51 L 102 61 C 101 66 96 70 91 70 L 30 70 C 24.5 70 20 74.5 20 80 C 20 82.2 20.7 84 22 84 Z" 
+            fill="url(#amanmartGreen)"/>
+      
+      <!-- Wheels -->
+      <circle cx="48" cy="110" r="14" fill="url(#amanmartGreen)"/>
+      <circle cx="92" cy="110" r="14" fill="url(#amanmartGreen)"/>
+    </g>
+
+    <!-- Typography: amanmart -->
+    <text x="175" y="115" 
+          font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Nunito', 'Comfortaa', sans-serif" 
+          font-size="88" 
+          font-weight="900" 
+          letter-spacing="-2px" 
+          fill="url(#amanmartGreen)">amanmart</text>
+
+    <!-- Tagline: HALAL TERJANGKAU -->
+    <text x="230" y="156" 
+          font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+          font-size="28" 
+          font-weight="700" 
+          letter-spacing="9px" 
+          fill="#FFFFFF" 
+          opacity="0.95">HALAL TERJANGKAU</text>
+  </g>
+</svg>
