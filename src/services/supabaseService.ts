@@ -342,20 +342,31 @@ class SupabaseService {
     init: RequestInit,
     extraHeaders?: Record<string, string>
   ): Promise<Response> {
+    if (anonKey.startsWith('sb_')) {
+      const headersApiKeyOnly: Record<string, string> = {
+        apikey: anonKey,
+        ...extraHeaders,
+      };
+      const resp = await fetch(url, { ...init, headers: headersApiKeyOnly });
+      if (resp.status === 401) {
+        return fetch(url, {
+          ...init,
+          headers: {
+            apikey: anonKey,
+            Authorization: `Bearer ${anonKey}`,
+            ...extraHeaders,
+          },
+        });
+      }
+      return resp;
+    }
+
     const headersWithBearer: Record<string, string> = {
       apikey: anonKey,
       Authorization: `Bearer ${anonKey}`,
       ...extraHeaders,
     };
-    const resp = await fetch(url, { ...init, headers: headersWithBearer });
-    if (resp.status === 401 && anonKey.startsWith('sb_')) {
-      const headersApiKeyOnly: Record<string, string> = {
-        apikey: anonKey,
-        ...extraHeaders,
-      };
-      return fetch(url, { ...init, headers: headersApiKeyOnly });
-    }
-    return resp;
+    return fetch(url, { ...init, headers: headersWithBearer });
   }
 
   // Test connection and verify if `products` table exists
@@ -437,9 +448,14 @@ class SupabaseService {
     }
   }
 
-  // Fetch all products (supports 10,000+ rows using paginated 1,000-row Range requests)
-  async fetchAllProducts(onProgress?: (loaded: number) => void): Promise<Product[] | null> {
-    if (!this.isConfigured()) return null;
+  // Fetch all products with explicit error reporting (uses limit/offset query params to avoid Range CORS issues on mobile browsers)
+  async fetchAllProductsWithStatus(onProgress?: (loaded: number) => void): Promise<{
+    products: Product[] | null;
+    error?: string;
+  }> {
+    if (!this.isConfigured()) {
+      return { products: null, error: 'Supabase belum dikonfigurasi.' };
+    }
     const cfg = this.getConfig();
 
     const pageSize = 1000;
@@ -448,21 +464,19 @@ class SupabaseService {
 
     try {
       while (true) {
-        const rangeStart = offset;
-        const rangeEnd = offset + pageSize - 1;
-
         const resp = await this.requestWithKeyFallback(
-          `${cfg.url}/rest/v1/products?select=*`,
+          `${cfg.url}/rest/v1/products?select=*&order=id.asc&limit=${pageSize}&offset=${offset}`,
           cfg.anonKey,
           { method: 'GET' },
-          {
-            'Content-Type': 'application/json',
-            Range: `${rangeStart}-${rangeEnd}`,
-          }
+          { 'Content-Type': 'application/json' }
         );
 
         if (!resp.ok) {
-          return null;
+          const errText = await resp.text().catch(() => '');
+          return {
+            products: null,
+            error: `HTTP ${resp.status}: ${errText.slice(0, 140) || 'Gagal membaca tabel public.products di Supabase.'}`,
+          };
         }
 
         const pageData: SupabaseProductRow[] = await resp.json();
@@ -482,10 +496,19 @@ class SupabaseService {
       }
 
       this.saveConfig({ ...cfg, lastSyncedAt: new Date().toISOString() });
-      return allRows.map((row, idx) => mapRowToProduct(row, idx));
-    } catch {
-      return null;
+      return { products: allRows.map((row, idx) => mapRowToProduct(row, idx)) };
+    } catch (err: any) {
+      return {
+        products: null,
+        error: err?.message || 'Koneksi ke Supabase gagal saat menarik katalog.',
+      };
     }
+  }
+
+  // Fetch all products (supports 10,000+ rows using paginated 1,000-row requests)
+  async fetchAllProducts(onProgress?: (loaded: number) => void): Promise<Product[] | null> {
+    const res = await this.fetchAllProductsWithStatus(onProgress);
+    return res.products;
   }
 
   // Upsert 10,000+ products in safe batches of 400 rows per HTTP request

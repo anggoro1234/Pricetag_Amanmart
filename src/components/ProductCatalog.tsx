@@ -19,9 +19,9 @@ import {
   RefreshCw,
   CheckCircle2
 } from 'lucide-react';
-import { Product, ProductStock, StoreLocation, LabelTemplateConfig, UserRole, PrintQueueItem, ImportProductRecord } from '../types';
+import { Product, ProductStock, StoreLocation, LabelTemplateConfig, UserRole, PrintQueueItem } from '../types';
 import { audioService } from '../services/audioService';
-import { storageService, sanitizeBarcodeValue, normalizeCategoryName } from '../services/storageService';
+import { storageService } from '../services/storageService';
 
 interface ProductCatalogProps {
   products: Product[];
@@ -80,64 +80,12 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
     setIsMigratingMaster(true);
     setMigrationMessage('Memuat 10.112 item dari Master Excel & menghapus data lokal lama...');
     try {
-      const resp = await fetch('/ITEMLISTMASTER_cleaned.csv');
-      if (!resp.ok) throw new Error('File master CSV tidak ditemukan.');
-      const text = await resp.text();
-      const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter((l) => l.trim().length > 0);
-      const records: ImportProductRecord[] = [];
-
-      // Parse CSV lines respecting quotes for "SKU,Item Name,Barcode,Price,Category,Stock"
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        const cols: string[] = [];
-        let cur = '';
-        let inQuotes = false;
-        for (let cIdx = 0; cIdx < line.length; cIdx++) {
-          const ch = line[cIdx];
-          if (ch === '"') {
-            if (inQuotes && line[cIdx + 1] === '"') {
-              cur += '"';
-              cIdx++;
-            } else {
-              inQuotes = !inQuotes;
-            }
-          } else if (ch === ',' && !inQuotes) {
-            cols.push(cur.trim());
-            cur = '';
-          } else {
-            cur += ch;
-          }
-        }
-        cols.push(cur.trim());
-
-        const sku = (cols[0] || '').trim();
-        const rawName = (cols[1] || '').trim().replace(/^["']+|["']+$/g, '');
-        const name = (rawName || (sku ? `ITEM SKU ${sku}` : '')).toUpperCase();
-        if (!name) continue;
-
-        const rawBarcode = (cols[2] || '').trim();
-        const priceNum = parseFloat((cols[3] || '0').replace(/,/g, ''));
-        const price = isNaN(priceNum) || priceNum < 0 ? 0 : Math.round(priceNum);
-        const category = normalizeCategoryName(cols[4]);
-        const stockNum = parseFloat((cols[5] || '0').replace(/,/g, ''));
-        const stock = isNaN(stockNum) ? 0 : Math.max(0, Math.round(stockNum));
-
-        records.push({
-          sku: sku || undefined,
-          name,
-          barcode: sanitizeBarcodeValue(rawBarcode, sku || name),
-          price,
-          category,
-          stock,
-        });
-      }
-
-      storageService.importProducts(records, activeStore.id, true, true);
+      const { count } = await storageService.loadBundledMasterCsv(activeStore.id, true);
       setCurrentPage(1);
       audioService.playPrintCompleteChime();
 
       setMigrationMessage(
-        `Berhasil! Data lokal lama telah dihapus dan digantikan dengan ${records.length.toLocaleString('id-ID')} item Master Amanmart (tersimpan di IndexedDB & sedang disinkronkan ke Supabase).`
+        `Berhasil! Data lokal lama telah dihapus dan digantikan dengan ${count.toLocaleString('id-ID')} item Master Amanmart (tersimpan di IndexedDB & sedang disinkronkan ke Supabase).`
       );
       setTimeout(() => setMigrationMessage(null), 7000);
     } catch (err: any) {

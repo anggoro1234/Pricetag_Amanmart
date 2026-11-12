@@ -5,7 +5,6 @@ import {
   Barcode as BarcodeIcon,
   X,
   Volume2,
-  Plus,
   Printer,
   CheckCircle2,
   AlertCircle,
@@ -14,6 +13,8 @@ import {
   ClipboardPaste,
   Smartphone,
   RotateCcw,
+  Database,
+  RefreshCw,
 } from 'lucide-react';
 import { Product, LabelTemplateConfig, StoreLocation } from '../types';
 import { storageService } from '../services/storageService';
@@ -22,6 +23,10 @@ import { LabelPreview } from './LabelPreview';
 
 const sanitizeScanString = (raw: string): string =>
   raw.replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '').trim();
+
+const isBpomQrCode = (code: string): boolean =>
+  /\(90\)\s*(?:na|nb|nc|nd|ne|md|ml|tr|qd|si|ti|sd|sl|ht|ff|dkl|gkl)/i.test(code) ||
+  /^\s*(?:na|nb|nc|nd|ne|md|ml|tr)\d{7,}/i.test(code);
 
 interface BarcodeScannerModalProps {
   isOpen: boolean;
@@ -62,6 +67,8 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [showSuccessNotification, setShowSuccessNotification] = useState<boolean>(false);
   const [continuousScan, setContinuousScan] = useState<boolean>(true);
   const [catalogCount, setCatalogCount] = useState<number>(0);
+  const [isSyncingCatalog, setIsSyncingCatalog] = useState<boolean>(false);
+  const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const pdaInputRef = useRef<HTMLInputElement | null>(null);
@@ -75,12 +82,57 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const submitPdaBufferRef = useRef<(rawValue: string, source: string) => void>(() => {});
   const selectedTemplate = templates[0];
 
+  // Subscribe to storage changes so catalogCount stays live when Supabase/Master sync finishes
+  useEffect(() => {
+    const updateCount = () => {
+      setCatalogCount(storageService.getProducts().length);
+    };
+    updateCount();
+    const unsub = storageService.subscribe(updateCount);
+    return () => unsub();
+  }, []);
+
+  const handlePullSupabaseCatalog = useCallback(async () => {
+    setIsSyncingCatalog(true);
+    setSyncStatusMsg('Menarik katalog produk dari Supabase...');
+    try {
+      const res = await storageService.pullAllFromSupabase((loaded) => {
+        setSyncStatusMsg(`Mengunduh dari Supabase: ${loaded.toLocaleString('id-ID')} item...`);
+      });
+      setCatalogCount(storageService.getProducts().length);
+      if (res.ok) {
+        setSyncStatusMsg(`Berhasil menarik ${res.count.toLocaleString('id-ID')} item dari Supabase!`);
+      } else {
+        setSyncStatusMsg(res.error || 'Gagal menarik data Supabase.');
+      }
+    } catch (err: any) {
+      setSyncStatusMsg(err?.message || 'Error koneksi Supabase.');
+    } finally {
+      setIsSyncingCatalog(false);
+    }
+  }, []);
+
+  const handleLoadMasterCatalogLocal = useCallback(async () => {
+    setIsSyncingCatalog(true);
+    setSyncStatusMsg('Memuat 10.112 item Master CSV langsung ke PDA...');
+    try {
+      const { count } = await storageService.loadBundledMasterCsv(activeStore.id, false);
+      setCatalogCount(storageService.getProducts().length);
+      setSyncStatusMsg(`Berhasil memuat ${count.toLocaleString('id-ID')} item Master ke PDA!`);
+    } catch (err: any) {
+      setSyncStatusMsg(err?.message || 'Gagal memuat Master CSV.');
+    } finally {
+      setIsSyncingCatalog(false);
+    }
+  }, [activeStore.id]);
+
   // Detect Android / Mobile Data Terminal and sync catalog count on modal open
   useEffect(() => {
     const androidDevice = typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent);
     setIsAndroid(androidDevice);
     if (isOpen) {
-      setCatalogCount(storageService.getProducts().length);
+      const currentLen = storageService.getProducts().length;
+      setCatalogCount(currentLen);
       if (androidDevice) {
         setActiveTab('usb_wedge');
       }
@@ -439,6 +491,47 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   };
 
   if (!isOpen) return null;
+
+  const catalogSyncBanner =
+    catalogCount <= 50 || syncStatusMsg ? (
+      <div className="border border-red-200 bg-red-50 rounded-xl p-3.5 space-y-2">
+        {catalogCount <= 50 && (
+          <>
+            <div className="text-xs font-bold text-red-800">
+              Katalog di Perangkat Ini Baru {catalogCount.toLocaleString('id-ID')} Item (Belum 10.000+ Item)
+            </div>
+            <p className="text-xs text-red-700">
+              Scan produk toko tidak akan ketemu sebelum data master dimuat ke browser PDA ini. Ketuk salah satu tombol di bawah:
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={isSyncingCatalog}
+                onClick={handlePullSupabaseCatalog}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCatalog ? 'animate-spin' : ''}`} />
+                Tarik Data Supabase
+              </button>
+              <button
+                type="button"
+                disabled={isSyncingCatalog}
+                onClick={handleLoadMasterCatalogLocal}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition"
+              >
+                <Database className="w-3.5 h-3.5" />
+                Muat Master 10.112 Item ke PDA
+              </button>
+            </div>
+          </>
+        )}
+        {syncStatusMsg && (
+          <p className="text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded px-2.5 py-1.5">
+            {syncStatusMsg}
+          </p>
+        )}
+      </div>
+    ) : null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
@@ -958,21 +1051,25 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
           ) : scannedBarcode ? (
             <div className="border border-amber-200 bg-amber-50 rounded-xl p-4 flex items-start gap-3">
               <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-              <div>
-                <div className="text-xs font-bold text-amber-800">
+              <div className="space-y-2 flex-1 min-w-0">
+                <div className="text-xs font-bold text-amber-900 break-all">
                   Barcode Not Found: {scannedBarcode} {lastScanTime ? `(${lastScanTime})` : ''}
                 </div>
-                <div className="text-xs text-amber-700 mt-0.5">
+                <div className="text-xs text-amber-800">
                   No matching product in inventory catalog ({catalogCount.toLocaleString('id-ID')} items loaded) for code &ldquo;{scannedBarcode}&rdquo;.
                 </div>
-                {catalogCount === 0 && (
-                  <div className="text-xs font-semibold text-red-700 mt-1">
-                    Perhatian: Katalog di perangkat ini masih 0 produk. Buka tombol Panel Supabase di header untuk menyinkronkan data dari cloud ke PDA ini.
+
+                {isBpomQrCode(scannedBarcode) && (
+                  <div className="bg-white border border-amber-300 rounded-lg p-2.5 text-xs text-amber-900">
+                    <span className="font-bold block">Terdeteksi QR Code BPOM 2D (Bukan Barcode Kasir):</span>
+                    Kode <code className="bg-amber-100 px-1 rounded break-all">{scannedBarcode}</code> adalah Nomor Izin Edar BPOM. Arahkan laser PDA ke <strong>barcode garis vertikal 1D (13 digit angka seperti 899...)</strong> pada kemasan produk.
                   </div>
                 )}
               </div>
             </div>
           ) : null}
+
+          {catalogSyncBanner}
         </div>
 
         {/* Footer */}

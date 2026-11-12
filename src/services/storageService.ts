@@ -595,26 +595,42 @@ class StorageService {
 
     const products = this.getProducts();
 
-    // 1. Exact match on barcode or SKU
-    const exactMatch = products.find(
-      (p) =>
-        p.barcode.trim().toLowerCase() === clean ||
-        p.sku.trim().toLowerCase() === clean
-    );
-    if (exactMatch) return exactMatch;
+    // Build candidate lookup keys (exact + GS1 AI (01) GTIN-14 extraction)
+    const candidates = new Set<string>([clean]);
+    const gs1GtinMatch = clean.match(/(?:\(01\)|^01)(\d{14})/);
+    if (gs1GtinMatch) {
+      const gtin14 = gs1GtinMatch[1];
+      candidates.add(gtin14);
+      candidates.add(gtin14.replace(/^0+/, ''));
+      if (gtin14.startsWith('0')) {
+        candidates.add(gtin14.slice(1));
+      }
+    }
+
+    for (const candidate of candidates) {
+      const exactMatch = products.find(
+        (p) =>
+          p.barcode.trim().toLowerCase() === candidate ||
+          p.sku.trim().toLowerCase() === candidate
+      );
+      if (exactMatch) return exactMatch;
+    }
 
     // 2. Fallback for UPC-A / EAN-13 leading-zero differences between laptop & Android PDA scanners
-    if (/^\d{6,}$/.test(clean)) {
-      const strippedClean = clean.replace(/^0+/, '');
-      if (strippedClean.length >= 6) {
-        return products.find((p) => {
-          const b = p.barcode.trim().toLowerCase();
-          if (/^\d{6,}$/.test(b) && b.replace(/^0+/, '') === strippedClean) {
-            return true;
-          }
-          const s = p.sku.trim().toLowerCase();
-          return /^\d{6,}$/.test(s) && s.replace(/^0+/, '') === strippedClean;
-        });
+    for (const candidate of candidates) {
+      if (/^\d{6,}$/.test(candidate)) {
+        const strippedClean = candidate.replace(/^0+/, '');
+        if (strippedClean.length >= 6) {
+          const match = products.find((p) => {
+            const b = p.barcode.trim().toLowerCase();
+            if (/^\d{6,}$/.test(b) && b.replace(/^0+/, '') === strippedClean) {
+              return true;
+            }
+            const s = p.sku.trim().toLowerCase();
+            return /^\d{6,}$/.test(s) && s.replace(/^0+/, '') === strippedClean;
+          });
+          if (match) return match;
+        }
       }
     }
 
@@ -967,7 +983,8 @@ class StorageService {
     records: ImportProductRecord[],
     targetStoreId: string = 'store-krg',
     updateExisting: boolean = true,
-    replaceAllLocal: boolean = false
+    replaceAllLocal: boolean = false,
+    syncToCloud: boolean = true
   ): { added: number; updated: number; products: Product[]; touchedProducts: Product[] } {
     if (replaceAllLocal && typeof window !== 'undefined') {
       try {
@@ -1142,8 +1159,8 @@ class StorageService {
     const finalProducts = [...newProductsToPrepend, ...existingProducts];
     this.persistProducts(finalProducts);
 
-    // Sync imported/updated items to Supabase in background if configured
-    if (this.isOnline() && supabaseService.isConfigured() && touchedProducts.length > 0) {
+    // Sync imported/updated items to Supabase in background if configured and enabled
+    if (syncToCloud && this.isOnline() && supabaseService.isConfigured() && touchedProducts.length > 0) {
       supabaseService.upsertProductsBatch(touchedProducts).catch(() => {});
     }
 
@@ -1151,6 +1168,75 @@ class StorageService {
     this.broadcastChange();
 
     return { added, updated, products: finalProducts, touchedProducts };
+  }
+
+  // Shared helper to load bundled 10,112-item master CSV (/ITEMLISTMASTER_cleaned.csv) into IndexedDB
+  async loadBundledMasterCsv(
+    targetStoreId: string = 'store-krg',
+    syncToCloud: boolean = false
+  ): Promise<{ count: number }> {
+    const resp = await fetch('/ITEMLISTMASTER_cleaned.csv');
+    if (!resp.ok) {
+      throw new Error('File master CSV (/ITEMLISTMASTER_cleaned.csv) tidak ditemukan.');
+    }
+    const text = await resp.text();
+    const lines = text
+      .replace(/^\uFEFF/, '')
+      .split(/\r?\n/)
+      .filter((l) => l.trim().length > 0);
+    const records: ImportProductRecord[] = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      const cols: string[] = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let cIdx = 0; cIdx < line.length; cIdx++) {
+        const ch = line[cIdx];
+        if (ch === '"') {
+          if (inQuotes && line[cIdx + 1] === '"') {
+            cur += '"';
+            cIdx++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (ch === ',' && !inQuotes) {
+          cols.push(cur.trim());
+          cur = '';
+        } else {
+          cur += ch;
+        }
+      }
+      cols.push(cur.trim());
+
+      const sku = (cols[0] || '').trim();
+      const rawName = (cols[1] || '').trim().replace(/^["']+|["']+$/g, '');
+      const name = (rawName || (sku ? `ITEM SKU ${sku}` : '')).toUpperCase();
+      if (!name) continue;
+
+      const rawBarcode = (cols[2] || '').trim();
+      const priceNum = parseFloat((cols[3] || '0').replace(/,/g, ''));
+      const price = isNaN(priceNum) || priceNum < 0 ? 0 : Math.round(priceNum);
+      const category = normalizeCategoryName(cols[4]);
+      const stockNum = parseFloat((cols[5] || '0').replace(/,/g, ''));
+      const stock = isNaN(stockNum) ? 0 : Math.max(0, Math.round(stockNum));
+
+      records.push({
+        sku: sku || undefined,
+        name,
+        barcode: sanitizeBarcodeValue(rawBarcode, sku || name),
+        price,
+        category,
+        stock,
+      });
+    }
+
+    if (records.length === 0) {
+      throw new Error('Master CSV tidak berisi baris produk yang valid.');
+    }
+
+    this.importProducts(records, targetStoreId, true, true, syncToCloud);
+    return { count: records.length };
   }
 
   // --- Supabase Cloud Sync Helpers ---
@@ -1167,20 +1253,32 @@ class StorageService {
     if (!supabaseService.isConfigured()) {
       return { ok: false, count: 0, error: 'Supabase belum dikonfigurasi' };
     }
-    const remoteProducts = await supabaseService.fetchAllProducts(onProgress);
-    if (!remoteProducts) {
-      return { ok: false, count: 0, error: 'Gagal mengambil data dari Supabase (Pastikan SQL Schema sudah dijalankan di SQL Editor Supabase).' };
+    const res = await supabaseService.fetchAllProductsWithStatus(onProgress);
+    if (!res.products) {
+      return {
+        ok: false,
+        count: 0,
+        error:
+          res.error ||
+          'Gagal mengambil data dari Supabase (Pastikan SQL Schema sudah dijalankan di SQL Editor Supabase).',
+      };
     }
-    if (remoteProducts.length > 0) {
-      if (typeof window !== 'undefined') {
-        try {
-          localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
-        } catch {}
-      }
-      this.persistProducts(remoteProducts);
-      this.broadcastChange();
+    if (res.products.length === 0) {
+      return {
+        ok: false,
+        count: 0,
+        error:
+          'Tabel public.products di Supabase masih kosong (0 baris). Push master data dari Laptop terlebih dahulu atau muat Master CSV langsung.',
+      };
     }
-    return { ok: true, count: remoteProducts.length };
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
+      } catch {}
+    }
+    this.persistProducts(res.products);
+    this.broadcastChange();
+    return { ok: true, count: res.products.length };
   }
 
   // --- Templates ---
