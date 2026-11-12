@@ -13,10 +13,11 @@ import {
 } from '../types';
 import { INITIAL_PRODUCTS, INITIAL_STORES, INITIAL_TEMPLATES, INITIAL_USERS } from '../data/initialData';
 import { audioService } from './audioService';
-import { idbGetProducts, idbSaveProducts, supabaseService } from './supabaseService';
+import { idbGetProducts, idbSaveProducts, idbClearProducts, supabaseService } from './supabaseService';
 
 const STORAGE_KEYS = {
   PRODUCTS: 'aman_label_products_v1',
+  LOCAL_DATA_PURGED: 'aman_local_data_purged_v1',
   STORES: 'aman_label_stores_v1',
   TEMPLATES: 'aman_label_templates_v1',
   CURRENT_USER: 'aman_label_current_user_v1',
@@ -69,7 +70,14 @@ export const sanitizeBarcodeValue = (rawBarcode?: string, fallbackSeed?: string)
     .replace(/^['"]+|['"]+$/g, '')
     .replace(/\s+/g, '');
 
-  if (!clean || clean === '-' || clean === '0' || clean.toLowerCase() === 'nan') {
+  // Treat empty, dashes, '0', '00000', 'nan', or text strings with letters (e.g. "BANTEXDISPLAYBOOK") as needing EAN-13 generation
+  if (
+    !clean ||
+    clean === '-' ||
+    /^0+$/.test(clean) ||
+    clean.toLowerCase() === 'nan' ||
+    /[a-df-zA-DF-Z]/.test(clean)
+  ) {
     return generateValidEan13(fallbackSeed);
   }
 
@@ -84,12 +92,12 @@ export const sanitizeBarcodeValue = (rawBarcode?: string, fallbackSeed?: string)
   // Detect corrupted barcodes:
   // 1. Short numeric fragments (< 5 digits, e.g. "658", "843", "000" from split decimal stock)
   // 2. Scientific notation precision loss (12-13 digits ending in 6 or more zeros e.g. 8990000000000 or 9000000000000)
-  // 3. Contains semicolons or invalid characters
+  // 3. Contains semicolons or any non-numeric characters
   const isShortFragment = clean.length < 5;
   const isSciNotationPrecisionLoss = /^[0-9]{11,14}$/.test(clean) && /0{6,}$/.test(clean);
-  const hasCorruptChars = clean.includes(';');
+  const hasNonDigits = /[^0-9]/.test(clean);
 
-  if (isShortFragment || isSciNotationPrecisionLoss || hasCorruptChars) {
+  if (isShortFragment || isSciNotationPrecisionLoss || hasNonDigits) {
     return generateValidEan13(fallbackSeed);
   }
 
@@ -235,8 +243,14 @@ class StorageService {
       localStorage.setItem(STORAGE_KEYS.ACTIVE_STORE, JSON.stringify('store-krg'));
     }
 
+    const isLocalPurged = localStorage.getItem(STORAGE_KEYS.LOCAL_DATA_PURGED) === 'true';
+
     if (!localStorage.getItem(STORAGE_KEYS.PRODUCTS)) {
-      this.persistProducts([...INITIAL_PRODUCTS]);
+      if (isLocalPurged) {
+        this.memoryProducts = [];
+      } else {
+        this.persistProducts([...INITIAL_PRODUCTS]);
+      }
     } else {
       // Ensure existing products have stocks for all 8 branches, repair any corrupted CSV imports, & merge new default products
       try {
@@ -350,32 +364,39 @@ class StorageService {
           }
         });
 
-        // Merge any newly added default products (e.g. Sauce & Condiments) not yet in localStorage
-        INITIAL_PRODUCTS.forEach((initProd) => {
-          const exists = repairedProds.some(
-            (p) => p.id === initProd.id || p.sku === initProd.sku || p.barcode === initProd.barcode
-          );
-          if (!exists) {
-            repairedProds.push(initProd);
-            modified = true;
-          }
-        });
+        // Only merge default demo products if the user has NOT purged local demo data
+        if (!isLocalPurged) {
+          INITIAL_PRODUCTS.forEach((initProd) => {
+            const exists = repairedProds.some(
+              (p) => p.id === initProd.id || p.sku === initProd.sku || p.barcode === initProd.barcode
+            );
+            if (!exists) {
+              repairedProds.push(initProd);
+              modified = true;
+            }
+          });
+        }
 
         this.memoryProducts = repairedProds;
-        if (modified) {
-          this.persistProducts(repairedProds);
-        }
       } catch {
-        this.memoryProducts = [...INITIAL_PRODUCTS];
+        this.memoryProducts = isLocalPurged ? [] : [...INITIAL_PRODUCTS];
       }
     }
 
     // Hydrate full 10,000+ dataset from IndexedDB (and Supabase Cloud if configured)
     idbGetProducts()
       .then((idbProds) => {
-        if (idbProds && idbProds.length > (this.memoryProducts?.length || 0)) {
-          this.memoryProducts = idbProds;
-          this.notifyListeners();
+        if (idbProds && idbProds.length > 0) {
+          // If IndexedDB has more items (e.g. 10,000 items vs 250 localStorage snapshot), use IndexedDB as source of truth
+          if (idbProds.length >= (this.memoryProducts?.length || 0)) {
+            this.memoryProducts = idbProds;
+            this.notifyListeners();
+          } else if (this.memoryProducts && this.memoryProducts.length > idbProds.length) {
+            idbSaveProducts(this.memoryProducts).catch(() => {});
+          }
+        } else if (this.memoryProducts && this.memoryProducts.length > 0) {
+          // Seed IndexedDB if it was empty
+          idbSaveProducts(this.memoryProducts).catch(() => {});
         }
       })
       .catch(() => {})
@@ -510,18 +531,55 @@ class StorageService {
 
   // --- Products Management ---
   getProducts(): Product[] {
-    if (this.memoryProducts && this.memoryProducts.length > 0) {
+    if (this.memoryProducts !== null) {
       return this.memoryProducts;
     }
+    const isLocalPurged =
+      typeof window !== 'undefined' &&
+      localStorage.getItem(STORAGE_KEYS.LOCAL_DATA_PURGED) === 'true';
     try {
       const data = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
-      const parsed = data ? JSON.parse(data) : INITIAL_PRODUCTS;
-      this.memoryProducts = parsed;
-      return parsed;
+      if (data) {
+        const parsed = JSON.parse(data);
+        this.memoryProducts = Array.isArray(parsed) ? parsed : [];
+        return this.memoryProducts;
+      }
+      this.memoryProducts = isLocalPurged ? [] : [...INITIAL_PRODUCTS];
+      return this.memoryProducts;
     } catch {
-      this.memoryProducts = [...INITIAL_PRODUCTS];
+      this.memoryProducts = isLocalPurged ? [] : [...INITIAL_PRODUCTS];
       return this.memoryProducts;
     }
+  }
+
+  // Detect if the catalog still contains the old local dummy data (e.g. BONELESS PAHA FZ/ KG SKU 50007)
+  isUsingLegacyLocalDemoData(): boolean {
+    const prods = this.getProducts();
+    if (prods.length === 0 || prods.length > 50) return false;
+    return prods.some(
+      (p) =>
+        p.id === 'prod-1' ||
+        p.id === 'prod-fresh-1' ||
+        p.sku === '50007' ||
+        p.name.includes('BONELESS PAHA FZ/ KG')
+    );
+  }
+
+  // Mitigasi Data Lokal Lama: Bersihkan seluruh data lokal (localStorage & IndexedDB) agar murni memakai Supabase / Master Import
+  async clearLocalCatalog(clearSupabaseAlso: boolean = false): Promise<void> {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
+        localStorage.removeItem(STORAGE_KEYS.PRODUCTS);
+        localStorage.removeItem(STORAGE_KEYS.ALERTS);
+      } catch {}
+    }
+    this.memoryProducts = [];
+    await idbClearProducts();
+    if (clearSupabaseAlso && this.isOnline() && supabaseService.isConfigured()) {
+      await supabaseService.deleteAllProducts().catch(() => {});
+    }
+    this.broadcastChange();
   }
 
   getProductById(id: string): Product | undefined {
@@ -880,9 +938,16 @@ class StorageService {
   importProducts(
     records: ImportProductRecord[],
     targetStoreId: string = 'store-krg',
-    updateExisting: boolean = true
-  ): { added: number; updated: number; products: Product[] } {
-    const existingProducts = [...this.getProducts()];
+    updateExisting: boolean = true,
+    replaceAllLocal: boolean = false
+  ): { added: number; updated: number; products: Product[]; touchedProducts: Product[] } {
+    if (replaceAllLocal && typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
+      } catch {}
+    }
+
+    const existingProducts = replaceAllLocal ? [] : [...this.getProducts()];
     const stores = this.getStores();
     let added = 0;
     let updated = 0;
@@ -906,11 +971,14 @@ class StorageService {
 
     records.forEach((rec, idx) => {
       let cleanName = rec.name ? rec.name.trim().replace(/^["']+|["']+$/g, '').trim() : '';
+      let rawSku = rec.sku ? rec.sku.trim() : '';
+      if (!cleanName && rawSku) {
+        cleanName = `ITEM SKU ${rawSku}`;
+      }
       if (!cleanName) return;
 
       let rawBarcode = rec.barcode ? rec.barcode.trim() : '';
-      let unitPrice = typeof rec.price === 'number' && !isNaN(rec.price) ? Math.max(0, rec.price) : 0;
-      let rawSku = rec.sku ? rec.sku.trim() : '';
+      let unitPrice = typeof rec.price === 'number' && !isNaN(rec.price) ? Math.max(0, Math.round(rec.price)) : 0;
       let rawCategory = rec.category ? rec.category.trim() : '';
       let rawStock = rec.stock;
 
@@ -1006,8 +1074,13 @@ class StorageService {
           };
         });
 
+        // Deterministic ID based on SKU when available so Supabase upsert never duplicates items
+        const deterministicId = rawSku
+          ? `prod-sku-${rawSku.replace(/[^a-zA-Z0-9_-]/g, '')}`
+          : `prod-${batchTimestamp}-${idx}-${Math.random().toString(36).substring(2, 6)}`;
+
         const newProd: Product = {
-          id: `prod-${batchTimestamp}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
+          id: deterministicId,
           sku: newSku,
           barcode: cleanBarcode,
           barcodeType: 'EAN13',
@@ -1049,7 +1122,7 @@ class StorageService {
     this.evaluateStockAlerts();
     this.broadcastChange();
 
-    return { added, updated, products: finalProducts };
+    return { added, updated, products: finalProducts, touchedProducts };
   }
 
   // --- Supabase Cloud Sync Helpers ---
@@ -1068,9 +1141,14 @@ class StorageService {
     }
     const remoteProducts = await supabaseService.fetchAllProducts(onProgress);
     if (!remoteProducts) {
-      return { ok: false, count: 0, error: 'Gagal mengambil data dari Supabase' };
+      return { ok: false, count: 0, error: 'Gagal mengambil data dari Supabase (Pastikan SQL Schema sudah dijalankan di SQL Editor Supabase).' };
     }
     if (remoteProducts.length > 0) {
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
+        } catch {}
+      }
       this.persistProducts(remoteProducts);
       this.broadcastChange();
     }

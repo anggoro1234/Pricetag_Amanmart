@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { StoreLocation, ImportProductRecord, Product } from '../types';
 import { audioService } from '../services/audioService';
-import { sanitizeBarcodeValue, normalizeCategoryName } from '../services/storageService';
+import { sanitizeBarcodeValue, normalizeCategoryName, storageService } from '../services/storageService';
 
 interface ProductImportModalProps {
   isOpen: boolean;
@@ -20,7 +20,12 @@ interface ProductImportModalProps {
   stores: StoreLocation[];
   activeStoreId: string;
   existingProducts: Product[];
-  onImportComplete: (importedProducts: ImportProductRecord[], targetStoreId: string, updateExisting: boolean) => void;
+  onImportComplete: (
+    importedProducts: ImportProductRecord[],
+    targetStoreId: string,
+    updateExisting: boolean,
+    replaceAllLocal: boolean
+  ) => void;
 }
 
 // Function to parse numeric price string with currency and separators
@@ -35,7 +40,7 @@ const parsePrice = (val: string): number => {
 
   if (!clean || clean === '-') return 0;
 
-  // Check Indonesian / European decimal format e.g. "56.500,00" or "56.500" vs "56500.50"
+  // Check Indonesian / European decimal format e.g. "56.500,00" or "56.500" vs "56500.50" or "9991.30588"
   if (clean.includes('.') && clean.includes(',')) {
     if (clean.lastIndexOf(',') > clean.lastIndexOf('.')) {
       // Format: 56.500,00
@@ -50,16 +55,14 @@ const parsePrice = (val: string): number => {
   } else if (clean.includes(',') && clean.indexOf(',') !== clean.lastIndexOf(',')) {
     clean = clean.replace(/,/g, '');
   } else if (clean.includes('.')) {
-    // Check if it's thousands separator (e.g. 2.900) or decimal (e.g. 2.9)
+    // Only treat single dot as thousands separator if there are 1-3 digits before dot AND exactly 3 digits after dot (e.g. "2.900" or "56.500")
     const parts = clean.split('.');
-    if (parts[1] && parts[1].length === 3) {
+    if (parts[1] && parts[1].length === 3 && parts[0].length <= 3) {
       clean = clean.replace(/\./g, '');
     }
   } else if (clean.includes(',')) {
     const parts = clean.split(',');
     if (parts[1] && parts[1].length === 3 && parseInt(parts[0], 10) > 0 && parts[0].length <= 3) {
-      // Could be thousands separator like 56,500 if price > 100
-      // Wait: in Indonesia, prices are in thousands (e.g. 2900 to 500000), while decimal comma is ,00
       clean = clean.replace(/,/g, '');
     } else {
       clean = clean.replace(',', '.');
@@ -333,11 +336,15 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
   const [activeTab, setActiveTab] = useState<'upload' | 'paste'>('upload');
   const [targetStoreId, setTargetStoreId] = useState<string>(activeStoreId || stores[0]?.id || 'store-krg');
   const [updateExisting, setUpdateExisting] = useState<boolean>(true);
+  const [replaceAllLocal, setReplaceAllLocal] = useState<boolean>(() =>
+    storageService.isUsingLegacyLocalDemoData()
+  );
   const [rawText, setRawText] = useState<string>('');
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isLoadingMaster, setIsLoadingMaster] = useState<boolean>(false);
   const [importResult, setImportResult] = useState<{ added: number; updated: number } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -348,14 +355,16 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     const nameMap = new Map<string, Product>();
     const barcodeSet = new Set<string>();
 
-    existingProducts.forEach((p) => {
-      if (p.sku) skuMap.set(p.sku.toLowerCase(), p);
-      if (p.name) nameMap.set(p.name.toLowerCase(), p);
-      if (p.barcode) barcodeSet.add(p.barcode.toLowerCase());
-    });
+    if (!replaceAllLocal) {
+      existingProducts.forEach((p) => {
+        if (p.sku) skuMap.set(p.sku.toLowerCase(), p);
+        if (p.name) nameMap.set(p.name.toLowerCase(), p);
+        if (p.barcode) barcodeSet.add(p.barcode.toLowerCase());
+      });
+    }
 
     return { skuMap, nameMap, barcodeSet };
-  }, [existingProducts]);
+  }, [existingProducts, replaceAllLocal]);
 
   // Parse raw text into structured records
   const parsedRecords = useMemo((): ImportProductRecord[] => {
@@ -445,6 +454,18 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
           bulkPriceIdx = idx;
         }
       });
+    } else if (
+      firstRow.length >= 4 &&
+      /^[0-9]{4,8}$/.test((firstRow[0] || '').trim()) &&
+      /[a-zA-Z]{2,}/.test((firstRow[1] || '').trim())
+    ) {
+      // Auto-detect headerless rows in "SKU, Item Name, Barcode, Price, Category, Stock" format
+      skuIdx = 0;
+      nameIdx = 1;
+      barcodeIdx = 2;
+      priceIdx = 3;
+      categoryIdx = 4;
+      stockIdx = 5;
     }
 
     const records: ImportProductRecord[] = [];
@@ -453,7 +474,7 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
       let cols = parseCsvLine(line, primaryDelim);
       if (cols.length === 0 || !cols.some((c) => c.length > 0)) return;
 
-      // Extra safety: if cols[0] still has embedded semicolons (e.g. from a doubly-quoted cell in Excel), split it
+      // Extra safety: if cols[nameIdx] still has embedded semicolons (e.g. from a doubly-quoted cell in Excel), split it
       if ((cols[nameIdx]?.split(';').length ?? 0) >= 3) {
         const reconstructed = cols.join(',');
         cols = parseCsvLine(reconstructed, ';');
@@ -477,15 +498,20 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
         if (semiParts[5] !== undefined && !rawStock) rawStock = semiParts[5];
       }
 
-      const name = rawName
+      const sku = rawSku ? rawSku.replace(/^['"]+|['"]+$/g, '').trim() : undefined;
+
+      let name = rawName
         .replace(/^['";]+|['";]+$/g, '')
         .replace(/\s+/g, ' ')
         .trim()
         .toUpperCase();
 
+      // Fallback if Item Name is empty in CSV row (e.g. "200540,,0,26900.0,Fresh,-23.0")
+      if (!name && sku) {
+        name = `ITEM SKU ${sku}`;
+      }
       if (!name) return;
 
-      const sku = rawSku ? rawSku.replace(/^['"]+|['"]+$/g, '').trim() : undefined;
       const price = parsePrice(rawPrice);
       const category = normalizeCategoryName(rawCategory);
       const stock = parseStock(rawStock, 50);
@@ -504,8 +530,9 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
       const isInputCorruptedOrEmpty =
         !cleanedInputBc ||
         cleanedInputBc === '-' ||
-        cleanedInputBc === '0' ||
+        /^0+$/.test(cleanedInputBc) ||
         cleanedInputBc.length < 5 ||
+        /[a-df-zA-DF-Z]/.test(cleanedInputBc) ||
         /e\+/i.test(cleanedInputBc) ||
         (/^[0-9]{11,14}$/.test(cleanedInputBc) && /0{6,}$/.test(cleanedInputBc));
 
@@ -611,19 +638,38 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     }
   };
 
-  // Sample CSV generator (Excel-safe: uses ";" delimiter + ="barcode" so Excel doesn't turn barcodes into 8.99E+12!)
+  // Load the bundled 10,112-item Amanmart master CSV directly
+  const handleLoadBundledMasterCsv = async () => {
+    setIsLoadingMaster(true);
+    setFileError(null);
+    try {
+      const resp = await fetch('/ITEMLISTMASTER_cleaned.csv');
+      if (!resp.ok) throw new Error('File ITEMLISTMASTER_cleaned.csv tidak ditemukan');
+      const text = await resp.text();
+      setFileName('ITEMLISTMASTER_cleaned.csv (10.112 Item Master Amanmart)');
+      setReplaceAllLocal(true);
+      setRawText(text);
+      audioService.playScanBeep();
+    } catch (err: any) {
+      setFileError(err?.message || 'Gagal memuat file master');
+    } finally {
+      setIsLoadingMaster(false);
+    }
+  };
+
+  // Sample CSV generator matching exact "SKU,Item Name,Barcode,Price,Category,Stock" format
   const handleDownloadSampleCsv = () => {
     const csvContent =
       '\uFEFF' +
       [
-        'Item Name;Barcode;Price;SKU;Category;Stock',
-        'INDOMIE SOTO MIE 70GR;="089686010022";2900;1001043;Instant Food;60',
-        'TEH BOTOL SOSRO 450ML;="8992688001017";7500;1003056;Beverages;45',
-        'POKKY CHOCOLATE 47GR;="8993077110123";9800;1004115;Snacks;35',
-        'SABUN LIFEBUOY LEMON 85GR;="8999999052058";4500;1005205;Personal Care;80',
-        'MINYAK GORENG SANIA 2L;="8992775211024";34500;1006001;Grocery;30',
-        'ROTI TAWAR SARI ROTI;="8998888123456";16000;1007010;Bakery;25',
-        'BONELESS PAHA FZ/ KG;;56500;50007;Fresh;44',
+        'SKU,Item Name,Barcode,Price,Category,Stock',
+        '1000001,ADEM SARI CHINGKU HERBAL TEA CAN 320ML,8992772586023,8900.0,Beverages,36.0',
+        '1000002,ADEM SARI CHINGKU SPARKLING LEMON 320ML,8992772586030,8900.0,Beverages,48.0',
+        '1000003,ADEM SARI CHINGKU HERBAL LEMON PET 350ML,8992772585026,8900.0,Beverages,65.0',
+        '1000004,ADEM SARI CHINGKU HERBAL LEMON CAN 320ML,8992772586016,8000.0,Beverages,58.0',
+        '1000005,ADEM SARI DUS 5SX7GR,8992772123068,18500.0,Beverages,19.0',
+        '1000010,INDUK AYAM BERAS PANDAN WANGI BAG 5KG,8990007870022,113500.0,Fresh,49.0',
+        '1000014,BUNGA ILALANG BERAS PREMIUM BAG 5KG,8990007870176,74500.0,Grocery,0.0',
       ].join('\r\n');
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -636,7 +682,7 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     document.body.removeChild(link);
   };
 
-  // Sample Excel (.xls) generator with Text (@) column formatting so barcodes never become 8.99E+12 in Excel
+  // Sample Excel (.xls) generator with Text (@) column formatting matching "SKU,Item Name,Barcode,Price,Category,Stock"
   const handleDownloadSampleExcel = () => {
     const htmlExcel = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
 <head>
@@ -652,22 +698,22 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
 <table>
   <thead>
     <tr>
+      <th>SKU</th>
       <th>Item Name</th>
       <th>Barcode</th>
       <th>Price</th>
-      <th>SKU</th>
       <th>Category</th>
       <th>Stock</th>
     </tr>
   </thead>
   <tbody>
-    <tr><td>INDOMIE SOTO MIE 70GR</td><td class="text-cell">8996860100229</td><td class="num-cell">2900</td><td class="text-cell">1001043</td><td>Instant Food</td><td class="num-cell">60</td></tr>
-    <tr><td>TEH BOTOL SOSRO 450ML</td><td class="text-cell">8992688001017</td><td class="num-cell">7500</td><td class="text-cell">1003056</td><td>Beverages</td><td class="num-cell">45</td></tr>
-    <tr><td>POKKY CHOCOLATE 47GR</td><td class="text-cell">8993077110123</td><td class="num-cell">9800</td><td class="text-cell">1004115</td><td>Snacks</td><td class="num-cell">35</td></tr>
-    <tr><td>SABUN LIFEBUOY LEMON 85GR</td><td class="text-cell">8999999052058</td><td class="num-cell">4500</td><td class="text-cell">1005205</td><td>Personal Care</td><td class="num-cell">80</td></tr>
-    <tr><td>MINYAK GORENG SANIA 2L</td><td class="text-cell">8992775211024</td><td class="num-cell">34500</td><td class="text-cell">1006001</td><td>Grocery</td><td class="num-cell">30</td></tr>
-    <tr><td>ROTI TAWAR SARI ROTI</td><td class="text-cell">8998888123456</td><td class="num-cell">16000</td><td class="text-cell">1007010</td><td>Bakery</td><td class="num-cell">25</td></tr>
-    <tr><td>BONELESS PAHA FZ/ KG</td><td class="text-cell">8990000500079</td><td class="num-cell">56500</td><td class="text-cell">50007</td><td>Fresh</td><td class="num-cell">44</td></tr>
+    <tr><td class="text-cell">1000001</td><td>ADEM SARI CHINGKU HERBAL TEA CAN 320ML</td><td class="text-cell">8992772586023</td><td class="num-cell">8900</td><td>Beverages</td><td class="num-cell">36</td></tr>
+    <tr><td class="text-cell">1000002</td><td>ADEM SARI CHINGKU SPARKLING LEMON 320ML</td><td class="text-cell">8992772586030</td><td class="num-cell">8900</td><td>Beverages</td><td class="num-cell">48</td></tr>
+    <tr><td class="text-cell">1000003</td><td>ADEM SARI CHINGKU HERBAL LEMON PET 350ML</td><td class="text-cell">8992772585026</td><td class="num-cell">8900</td><td>Beverages</td><td class="num-cell">65</td></tr>
+    <tr><td class="text-cell">1000004</td><td>ADEM SARI CHINGKU HERBAL LEMON CAN 320ML</td><td class="text-cell">8992772586016</td><td class="num-cell">8000</td><td>Beverages</td><td class="num-cell">58</td></tr>
+    <tr><td class="text-cell">1000005</td><td>ADEM SARI DUS 5SX7GR</td><td class="text-cell">8992772123068</td><td class="num-cell">18500</td><td>Beverages</td><td class="num-cell">19</td></tr>
+    <tr><td class="text-cell">1000010</td><td>INDUK AYAM BERAS PANDAN WANGI BAG 5KG</td><td class="text-cell">8990007870022</td><td class="num-cell">113500</td><td>Fresh</td><td class="num-cell">49</td></tr>
+    <tr><td class="text-cell">1000014</td><td>BUNGA ILALANG BERAS PREMIUM BAG 5KG</td><td class="text-cell">8990007870176</td><td class="num-cell">74500</td><td>Grocery</td><td class="num-cell">0</td></tr>
   </tbody>
 </table>
 </body>
@@ -688,7 +734,7 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     setIsProcessing(true);
 
     try {
-      onImportComplete(parsedRecords, targetStoreId, updateExisting);
+      onImportComplete(parsedRecords, targetStoreId, updateExisting, replaceAllLocal);
       audioService.playPrintCompleteChime();
       setImportResult({
         added: previewStats.newItems,
@@ -719,10 +765,10 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-white flex items-center gap-2">
-                Import Products Catalog (Item, Barcode, Price)
+                Import Products Catalog (SKU, Item Name, Barcode, Price, Category, Stock)
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Upload CSV / Excel spreadsheet or paste product rows directly
+                Mendukung 10.000+ baris Excel / CSV &amp; Sinkronisasi Otomatis ke Database Supabase
               </p>
             </div>
           </div>
@@ -736,6 +782,28 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-6 overflow-y-auto space-y-5 flex-1 text-slate-800">
+          {/* Quick 1-Click Load 10,112 Master Items Banner */}
+          <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                File Master Excel Anda (10.112 Item) Siap Dimuat!
+              </div>
+              <p className="text-[11px] text-emerald-800 mt-0.5">
+                Format <code className="bg-emerald-100 px-1 rounded font-mono">SKU,Item Name,Barcode,Price,Category,Stock</code> sudah terverifikasi bebas error &amp; siap menggantikan data lokal lama.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleLoadBundledMasterCsv}
+              disabled={isLoadingMaster}
+              className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition shrink-0 flex items-center gap-1.5"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              {isLoadingMaster ? 'Memuat 10.112 Item...' : 'Muat 10.112 Item Master'}
+            </button>
+          </div>
+
           {/* Target Branch and Option Row */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
             <div>
@@ -761,9 +829,20 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
 
             <div className="flex flex-col justify-between">
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Update Options &amp; Templates
+                Update Options &amp; Mitigasi Data Lokal
               </label>
               <div className="space-y-2">
+                <label className="flex items-start gap-2 cursor-pointer text-xs font-semibold text-emerald-900 bg-emerald-50/80 p-2 rounded-lg border border-emerald-200">
+                  <input
+                    type="checkbox"
+                    checked={replaceAllLocal}
+                    onChange={(e) => setReplaceAllLocal(e.target.checked)}
+                    className="w-4 h-4 mt-0.5 text-emerald-600 rounded border-emerald-300 focus:ring-emerald-500"
+                  />
+                  <span>
+                    Hapus / Ganti seluruh data lokal lama dengan data baru ini (Mitigasi Data Lokal ke Supabase)
+                  </span>
+                </label>
                 <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700">
                   <input
                     type="checkbox"
@@ -780,7 +859,7 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
                     className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:text-blue-800 underline"
                   >
                     <Download className="w-3 h-3" />
-                    Download Template CSV (Anti E+12)
+                    Download Template CSV
                   </button>
                   <button
                     type="button"

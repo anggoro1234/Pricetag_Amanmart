@@ -169,13 +169,14 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
     setDraggedQueueIndex(null);
   };
 
-  // Add all products from the currently selected category
+  // Add up to 60 products from the currently selected category safely
   const handleAddCategoryToBatch = () => {
     if (!onAddProduct) return;
-    const targetProducts =
+    const targetProducts = (
       selectedCategory === 'ALL'
         ? filteredCatalog
-        : products.filter((p) => p.category === selectedCategory);
+        : products.filter((p) => p.category === selectedCategory)
+    ).slice(0, 60);
 
     targetProducts.forEach((p) => {
       onAddProduct(p, 1);

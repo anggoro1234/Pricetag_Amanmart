@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Building2, 
   ArrowRightLeft, 
@@ -45,33 +45,40 @@ export const StockSyncMatrix: React.FC<StockSyncMatrixProps> = ({
   const [transferQty, setTransferQty] = useState<number>(10);
   const [transferSuccess, setTransferSuccess] = useState<string | null>(null);
 
-  const filteredMatrixProducts = products.filter((p) => {
-    if (!matrixSearch.trim()) return true;
+  const filteredMatrixProducts = useMemo(() => {
+    if (!matrixSearch.trim()) return products;
     const q = matrixSearch.toLowerCase();
-    return (
-      p.name.toLowerCase().includes(q) ||
-      p.sku.toLowerCase().includes(q) ||
-      p.barcode.includes(q)
-    );
-  });
-  const totalMatrixPages = Math.max(1, Math.ceil(filteredMatrixProducts.length / MATRIX_PAGE_SIZE));
-  const safeMatrixPage = Math.min(matrixPage, totalMatrixPages);
-  const paginatedMatrixProducts = filteredMatrixProducts.slice(
-    (safeMatrixPage - 1) * MATRIX_PAGE_SIZE,
-    safeMatrixPage * MATRIX_PAGE_SIZE
-  );
-
-  const filteredTransferProducts = products
-    .filter((p) => {
-      if (!transferProductSearch.trim()) return true;
-      const q = transferProductSearch.toLowerCase();
-      return (
+    return products.filter(
+      (p) =>
         p.name.toLowerCase().includes(q) ||
         p.sku.toLowerCase().includes(q) ||
         p.barcode.includes(q)
-      );
-    })
-    .slice(0, 200);
+    );
+  }, [products, matrixSearch]);
+
+  const totalMatrixPages = Math.max(1, Math.ceil(filteredMatrixProducts.length / MATRIX_PAGE_SIZE));
+  const safeMatrixPage = Math.min(matrixPage, totalMatrixPages);
+  const paginatedMatrixProducts = useMemo(
+    () =>
+      filteredMatrixProducts.slice(
+        (safeMatrixPage - 1) * MATRIX_PAGE_SIZE,
+        safeMatrixPage * MATRIX_PAGE_SIZE
+      ),
+    [filteredMatrixProducts, safeMatrixPage]
+  );
+
+  const filteredTransferProducts = useMemo(() => {
+    if (!transferProductSearch.trim()) return products.slice(0, 200);
+    const q = transferProductSearch.toLowerCase();
+    return products
+      .filter(
+        (p) =>
+          p.name.toLowerCase().includes(q) ||
+          p.sku.toLowerCase().includes(q) ||
+          p.barcode.includes(q)
+      )
+      .slice(0, 200);
+  }, [products, transferProductSearch]);
 
   const transfers = storageService.getTransfers();
   const adjustments = storageService.getAdjustments();

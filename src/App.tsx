@@ -210,10 +210,34 @@ export default function App() {
     }
   };
 
-  // Add multiple items to batch
+  // Add multiple items to batch in a single O(N) state update (prevents UI lag on large batches)
   const handleAddBatchToQueue = (items: { product: Product; quantity: number }[]) => {
-    items.forEach((item) => {
-      handleAddToBatch(item.product, item.quantity);
+    setBatchQueue((prev) => {
+      const next = [...prev];
+      const idxMap = new Map<string, number>();
+      next.forEach((entry, idx) => idxMap.set(entry.product.id, idx));
+
+      const now = Date.now();
+      items.forEach(({ product, quantity }, i) => {
+        const existingIdx = idxMap.get(product.id);
+        if (existingIdx !== undefined) {
+          next[existingIdx] = {
+            ...next[existingIdx],
+            quantity: next[existingIdx].quantity + quantity,
+          };
+        } else {
+          idxMap.set(product.id, next.length);
+          next.push({
+            id: `queue-${now}-${i}-${product.id}`,
+            product,
+            quantity,
+            templateId: activeTemplateId,
+            storeId: activeStore.id,
+          });
+        }
+      });
+
+      return next;
     });
     setBatchPrintOpen(true);
     audioService.playPrintCompleteChime();
@@ -396,6 +420,7 @@ export default function App() {
             stores={stores}
             onQuickPrint={handleQuickPrint}
             onAddToBatch={handleAddToBatch}
+            onAddBatchToQueue={handleAddBatchToQueue}
             onOpenBatchPrint={() => setBatchPrintOpen(true)}
             batchQueue={batchQueue}
             onAdjustStock={(p) => {
@@ -412,6 +437,7 @@ export default function App() {
             }}
             onDeleteProduct={handleDeleteProduct}
             onOpenImport={() => setProductImportOpen(true)}
+            onOpenSupabaseModal={() => setDeployGuideOpen(true)}
             userRole={currentUser.role}
             templates={templates}
             showBulkPrice={activeTemplate?.showBulkPrice ?? false}
@@ -590,8 +616,8 @@ export default function App() {
           stores={stores}
           activeStoreId={activeStore.id}
           existingProducts={products}
-          onImportComplete={(imported, targetStoreId, updateExisting) => {
-            storageService.importProducts(imported, targetStoreId, updateExisting);
+          onImportComplete={(imported, targetStoreId, updateExisting, replaceAllLocal) => {
+            storageService.importProducts(imported, targetStoreId, updateExisting, replaceAllLocal);
           }}
         />
       )}

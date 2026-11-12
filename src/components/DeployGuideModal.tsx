@@ -46,6 +46,21 @@ export const DeployGuideModal: React.FC<DeployGuideModalProps> = ({ isOpen, onCl
       const cfg = supabaseService.getConfig();
       setSupabaseUrl(cfg.url || '');
       setSupabaseAnonKey(cfg.anonKey || '');
+      if (cfg.url && cfg.anonKey) {
+        setIsTesting(true);
+        supabaseService
+          .testConnection(cfg.url, cfg.anonKey)
+          .then((res) => {
+            setConnectionStatus({
+              tested: true,
+              ok: res.ok,
+              message: res.message,
+              rowCount: res.totalRemoteCount,
+            });
+          })
+          .catch(() => {})
+          .finally(() => setIsTesting(false));
+      }
     }
   }, [isOpen]);
 
@@ -385,6 +400,29 @@ export const DeployGuideModal: React.FC<DeployGuideModalProps> = ({ isOpen, onCl
                   >
                     <DownloadCloud className="w-3.5 h-3.5" />
                     Tarik Data dari Supabase
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (
+                        window.confirm(
+                          'Hapus seluruh data lokal lama dari browser ini agar hanya menggunakan data Supabase / Master Import?'
+                        )
+                      ) {
+                        await storageService.clearLocalCatalog(false);
+                        setConnectionStatus({
+                          tested: true,
+                          ok: true,
+                          message:
+                            'Data lokal lama berhasil dibersihkan! Silakan klik "Tarik Data dari Supabase" atau "Import Items" untuk memuat 10.112 item master.',
+                        });
+                      }
+                    }}
+                    disabled={isSyncing || isTesting}
+                    className="flex items-center gap-1.5 px-3.5 py-2 border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 rounded-xl font-bold text-xs transition disabled:opacity-50"
+                  >
+                    Bersihkan Data Lokal Lama
                   </button>
                 </div>
               </form>

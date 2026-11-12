@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Search, 
   Plus, 
@@ -14,10 +14,14 @@ import {
   GripVertical,
   FolderPlus,
   Eye,
-  EyeOff
+  EyeOff,
+  Database,
+  RefreshCw,
+  CheckCircle2
 } from 'lucide-react';
-import { Product, ProductStock, StoreLocation, LabelTemplateConfig, UserRole, PrintQueueItem } from '../types';
+import { Product, ProductStock, StoreLocation, LabelTemplateConfig, UserRole, PrintQueueItem, ImportProductRecord } from '../types';
 import { audioService } from '../services/audioService';
+import { storageService, sanitizeBarcodeValue, normalizeCategoryName } from '../services/storageService';
 
 interface ProductCatalogProps {
   products: Product[];
@@ -25,6 +29,7 @@ interface ProductCatalogProps {
   stores: StoreLocation[];
   onQuickPrint: (product: Product) => void;
   onAddToBatch: (product: Product, quantity: number) => void;
+  onAddBatchToQueue?: (items: { product: Product; quantity: number }[]) => void;
   onOpenBatchPrint?: () => void;
   batchQueue?: PrintQueueItem[];
   onAdjustStock: (product: Product) => void;
@@ -32,6 +37,7 @@ interface ProductCatalogProps {
   onAddNewProduct: () => void;
   onDeleteProduct: (productId: string) => void;
   onOpenImport?: () => void;
+  onOpenSupabaseModal?: () => void;
   userRole: UserRole;
   templates: LabelTemplateConfig[];
   showBulkPrice?: boolean;
@@ -44,6 +50,7 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
   stores,
   onQuickPrint,
   onAddToBatch,
+  onAddBatchToQueue,
   onOpenBatchPrint,
   batchQueue = [],
   onAdjustStock,
@@ -51,6 +58,7 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
   onAddNewProduct,
   onDeleteProduct,
   onOpenImport,
+  onOpenSupabaseModal,
   userRole,
   showBulkPrice = false,
   onToggleBulkPrice,
@@ -62,27 +70,123 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
   const [isDragOverTray, setIsDragOverTray] = useState<boolean>(false);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(100);
+  const [isMigratingMaster, setIsMigratingMaster] = useState<boolean>(false);
+  const [migrationMessage, setMigrationMessage] = useState<string | null>(null);
 
-  const categories = ['ALL', ...Array.from(new Set(products.map((p) => p.category)))];
+  const isLegacyLocalDemo = storageService.isUsingLegacyLocalDemoData();
 
-  const filteredProducts = products.filter((product) => {
-    const term = searchTerm.toLowerCase();
-    const matchesSearch =
-      !term ||
-      product.name.toLowerCase().includes(term) ||
-      product.sku.toLowerCase().includes(term) ||
-      product.barcode.toLowerCase().includes(term) ||
-      product.brand.toLowerCase().includes(term) ||
-      product.category.toLowerCase().includes(term);
+  // Quick 1-click helper to parse & replace local demo data with the 10,112-row master CSV and sync to Supabase
+  const handleReplaceWithMaster10k = async () => {
+    setIsMigratingMaster(true);
+    setMigrationMessage('Memuat 10.112 item dari Master Excel & menghapus data lokal lama...');
+    try {
+      const resp = await fetch('/ITEMLISTMASTER_cleaned.csv');
+      if (!resp.ok) throw new Error('File master CSV tidak ditemukan.');
+      const text = await resp.text();
+      const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter((l) => l.trim().length > 0);
+      const records: ImportProductRecord[] = [];
 
-    const matchesCategory = selectedCategory === 'ALL' || product.category === selectedCategory;
+      // Parse CSV lines respecting quotes for "SKU,Item Name,Barcode,Price,Category,Stock"
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        const cols: string[] = [];
+        let cur = '';
+        let inQuotes = false;
+        for (let cIdx = 0; cIdx < line.length; cIdx++) {
+          const ch = line[cIdx];
+          if (ch === '"') {
+            if (inQuotes && line[cIdx + 1] === '"') {
+              cur += '"';
+              cIdx++;
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (ch === ',' && !inQuotes) {
+            cols.push(cur.trim());
+            cur = '';
+          } else {
+            cur += ch;
+          }
+        }
+        cols.push(cur.trim());
 
-    const currentStock = product.stocks[activeStore.id]?.quantity ?? 0;
-    const threshold = product.stocks[activeStore.id]?.minThreshold ?? 20;
-    const matchesLowStock = !filterLowStockOnly || currentStock <= threshold;
+        const sku = (cols[0] || '').trim();
+        const rawName = (cols[1] || '').trim().replace(/^["']+|["']+$/g, '');
+        const name = (rawName || (sku ? `ITEM SKU ${sku}` : '')).toUpperCase();
+        if (!name) continue;
 
-    return matchesSearch && matchesCategory && matchesLowStock;
-  });
+        const rawBarcode = (cols[2] || '').trim();
+        const priceNum = parseFloat((cols[3] || '0').replace(/,/g, ''));
+        const price = isNaN(priceNum) || priceNum < 0 ? 0 : Math.round(priceNum);
+        const category = normalizeCategoryName(cols[4]);
+        const stockNum = parseFloat((cols[5] || '0').replace(/,/g, ''));
+        const stock = isNaN(stockNum) ? 0 : Math.max(0, Math.round(stockNum));
+
+        records.push({
+          sku: sku || undefined,
+          name,
+          barcode: sanitizeBarcodeValue(rawBarcode, sku || name),
+          price,
+          category,
+          stock,
+        });
+      }
+
+      storageService.importProducts(records, activeStore.id, true, true);
+      setCurrentPage(1);
+      audioService.playPrintCompleteChime();
+
+      setMigrationMessage(
+        `Berhasil! Data lokal lama telah dihapus dan digantikan dengan ${records.length.toLocaleString('id-ID')} item Master Amanmart (tersimpan di IndexedDB & sedang disinkronkan ke Supabase).`
+      );
+      setTimeout(() => setMigrationMessage(null), 7000);
+    } catch (err: any) {
+      setMigrationMessage(`Gagal memuat master data: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setIsMigratingMaster(false);
+    }
+  };
+
+  const handlePurgeLocalDataOnly = async () => {
+    if (
+      window.confirm(
+        'Bersihkan seluruh data lokal lama (seperti BONELESS PAHA FZ/ KG, dll.) dari browser ini agar siap menggunakan data Supabase / Import baru?'
+      )
+    ) {
+      await storageService.clearLocalCatalog(false);
+      setCurrentPage(1);
+      setMigrationMessage(
+        'Data lokal lama berhasil dibersihkan! Sekarang Anda dapat meng-import 10.000+ item atau menarik data dari Supabase.'
+      );
+      setTimeout(() => setMigrationMessage(null), 5000);
+    }
+  };
+
+  const categories = useMemo(
+    () => ['ALL', ...Array.from(new Set(products.map((p) => p.category)))],
+    [products]
+  );
+
+  const filteredProducts = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    return products.filter((product) => {
+      const matchesSearch =
+        !term ||
+        product.name.toLowerCase().includes(term) ||
+        product.sku.toLowerCase().includes(term) ||
+        product.barcode.toLowerCase().includes(term) ||
+        product.brand.toLowerCase().includes(term) ||
+        product.category.toLowerCase().includes(term);
+
+      const matchesCategory = selectedCategory === 'ALL' || product.category === selectedCategory;
+
+      const currentStock = product.stocks[activeStore.id]?.quantity ?? 0;
+      const threshold = product.stocks[activeStore.id]?.minThreshold ?? 20;
+      const matchesLowStock = !filterLowStockOnly || currentStock <= threshold;
+
+      return matchesSearch && matchesCategory && matchesLowStock;
+    });
+  }, [products, searchTerm, selectedCategory, activeStore.id, filterLowStockOnly]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
@@ -123,9 +227,19 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
     }
   };
 
-  // Add all filtered products from the current category to Batch Print
+  // Add current page products from the selected category to Batch Print safely
   const handleAddFilteredCategoryToBatch = () => {
-    filteredProducts.forEach((p) => {
+    const targetList = paginatedProducts;
+    if (onAddBatchToQueue) {
+      onAddBatchToQueue(
+        targetList.map((p) => ({
+          product: p,
+          quantity: getBatchQty(p.id),
+        }))
+      );
+      return;
+    }
+    targetList.forEach((p) => {
       onAddToBatch(p, getBatchQty(p.id));
     });
     audioService.playScanBeep();
@@ -139,19 +253,19 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
     }
   };
 
-  // Export Catalog to CSV (Excel-safe ";" delimiter and ="barcode" text formula)
+  // Export Catalog to CSV matching "SKU,Item Name,Barcode,Price,Category,Stock"
   const handleExportCSV = () => {
-    const headers = ['Item Name', 'Barcode', 'Price', 'SKU', 'Category', 'Stock'];
+    const headers = ['SKU', 'Item Name', 'Barcode', 'Price', 'Category', 'Stock'];
     const rows = products.map((p) => [
-      `"${p.name.replace(/"/g, '""')}"`,
-      `="${p.barcode}"`,
-      p.pricing.unitPrice,
       p.sku,
+      `"${p.name.replace(/"/g, '""')}"`,
+      p.barcode,
+      p.pricing.unitPrice,
       p.category,
       p.stocks[activeStore.id]?.quantity ?? 0,
     ]);
 
-    const csvBody = '\uFEFF' + [headers.join(';'), ...rows.map((e) => e.join(';'))].join('\r\n');
+    const csvBody = '\uFEFF' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\r\n');
     const blob = new Blob([csvBody], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -167,6 +281,79 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
 
   return (
     <div className="space-y-4">
+      {/* Mitigasi Data Lokal Lama & Integrasi Supabase Banner */}
+      {(isLegacyLocalDemo || products.length === 0 || migrationMessage) && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950 via-emerald-900 to-teal-900 text-white border border-emerald-700/60 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 shrink-0 mt-0.5">
+              <Database className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-xs sm:text-sm font-bold text-white">
+                  {migrationMessage
+                    ? 'Status Mitigasi & Sinkronisasi Supabase'
+                    : isLegacyLocalDemo
+                    ? 'Mitigasi Data Lokal Lama Terdeteksi (BONELESS PAHA FZ/ KG, dll.)'
+                    : 'Katalog Lokal Kosong — Siap Memuat Data Supabase / Master 10.000+ Item'}
+                </h3>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/30 border border-emerald-400/40 text-emerald-200">
+                  Supabase Terhubung: otbujeoxvwfnqwnpxnnd
+                </span>
+              </div>
+              <p className="text-[11px] sm:text-xs text-emerald-100/90 mt-1 leading-relaxed max-w-3xl">
+                {migrationMessage
+                  ? migrationMessage
+                  : 'Data lokal lama bawaan browser sudah tidak diperlukan karena sistem kini terintegrasi dengan Supabase & IndexedDB High-Capacity. Klik tombol di kanan untuk langsung mengganti seluruh data lokal lama dengan 10.112 Item Master Excel Anda atau membersihkan data lokal.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleReplaceWithMaster10k}
+              disabled={isMigratingMaster}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs shadow-sm transition active:scale-95 disabled:opacity-50"
+            >
+              {isMigratingMaster ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <CheckCircle2 className="w-3.5 h-3.5" />
+              )}
+              <span>
+                {isMigratingMaster
+                  ? 'Memproses 10.112 Item...'
+                  : 'Ganti dengan 10.112 Item Master & Sync Supabase'}
+              </span>
+            </button>
+
+            {isLegacyLocalDemo && (
+              <button
+                type="button"
+                onClick={handlePurgeLocalDataOnly}
+                disabled={isMigratingMaster}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-500/20 hover:bg-red-500/30 border border-red-400/40 text-red-100 font-bold text-xs transition"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Hapus Data Lokal Lama</span>
+              </button>
+            )}
+
+            {onOpenSupabaseModal && (
+              <button
+                type="button"
+                onClick={onOpenSupabaseModal}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white font-semibold text-xs transition"
+              >
+                <Database className="w-3.5 h-3.5 text-emerald-300" />
+                <span>Panel Supabase</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Top Controls Bar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row gap-3 items-center justify-between">
         {/* Search Field */}
