@@ -342,6 +342,21 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Fast O(1) lookup maps for existing products (prevents freezing when importing 10,000+ items)
+  const existingLookup = useMemo(() => {
+    const skuMap = new Map<string, Product>();
+    const nameMap = new Map<string, Product>();
+    const barcodeSet = new Set<string>();
+
+    existingProducts.forEach((p) => {
+      if (p.sku) skuMap.set(p.sku.toLowerCase(), p);
+      if (p.name) nameMap.set(p.name.toLowerCase(), p);
+      if (p.barcode) barcodeSet.add(p.barcode.toLowerCase());
+    });
+
+    return { skuMap, nameMap, barcodeSet };
+  }, [existingProducts]);
+
   // Parse raw text into structured records
   const parsedRecords = useMemo((): ImportProductRecord[] => {
     if (!rawText.trim()) return [];
@@ -475,12 +490,10 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
       const category = normalizeCategoryName(rawCategory);
       const stock = parseStock(rawStock, 50);
 
-      // Check if an existing product in catalog already has a valid barcode for this SKU / Name
-      const existingMatch = existingProducts.find(
-        (p) =>
-          (sku && p.sku.toLowerCase() === sku.toLowerCase()) ||
-          p.name.toLowerCase() === name.toLowerCase()
-      );
+      // O(1) lookup if an existing product in catalog already has a valid barcode for this SKU / Name
+      const existingMatch =
+        (sku ? existingLookup.skuMap.get(sku.toLowerCase()) : undefined) ||
+        existingLookup.nameMap.get(name.toLowerCase());
 
       let finalBarcode = '';
       const cleanedInputBc = rawBarcode
@@ -514,20 +527,18 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     });
 
     return records;
-  }, [rawText, existingProducts]);
+  }, [rawText, existingLookup]);
 
-  // Check matching status with existing catalog
+  // Check matching status with existing catalog in O(1) per record
   const previewStats = useMemo(() => {
     let existingMatches = 0;
     let newItems = 0;
 
     parsedRecords.forEach((rec) => {
-      const exists = existingProducts.some(
-        (p) =>
-          (rec.barcode && p.barcode.toLowerCase() === rec.barcode.toLowerCase()) ||
-          (rec.sku && p.sku.toLowerCase() === rec.sku.toLowerCase()) ||
-          p.name.toLowerCase() === rec.name.toLowerCase()
-      );
+      const exists =
+        (rec.barcode && existingLookup.barcodeSet.has(rec.barcode.toLowerCase())) ||
+        (rec.sku && existingLookup.skuMap.has(rec.sku.toLowerCase())) ||
+        existingLookup.nameMap.has(rec.name.toLowerCase());
       if (exists) existingMatches++;
       else newItems++;
     });
@@ -537,7 +548,7 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
       existingMatches,
       newItems,
     };
-  }, [parsedRecords, existingProducts]);
+  }, [parsedRecords, existingLookup]);
 
   // Handle file reading (.csv, .txt, .tsv, .xls, .xlsx)
   const handleFileUpload = async (file: File) => {
@@ -919,12 +930,10 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {parsedRecords.slice(0, 25).map((r, idx) => {
-                      const isMatch = existingProducts.some(
-                        (p) =>
-                          (r.barcode && p.barcode.toLowerCase() === r.barcode.toLowerCase()) ||
-                          (r.sku && p.sku.toLowerCase() === r.sku.toLowerCase()) ||
-                          p.name.toLowerCase() === r.name.toLowerCase()
-                      );
+                      const isMatch =
+                        (r.barcode && existingLookup.barcodeSet.has(r.barcode.toLowerCase())) ||
+                        (r.sku && existingLookup.skuMap.has(r.sku.toLowerCase())) ||
+                        existingLookup.nameMap.has(r.name.toLowerCase());
 
                       return (
                         <tr key={idx} className="hover:bg-slate-50/80">

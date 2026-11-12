@@ -60,12 +60,15 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
   const [filterLowStockOnly, setFilterLowStockOnly] = useState<boolean>(false);
   const [batchQuantities, setBatchQuantities] = useState<Record<string, number>>({});
   const [isDragOverTray, setIsDragOverTray] = useState<boolean>(false);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(100);
 
   const categories = ['ALL', ...Array.from(new Set(products.map((p) => p.category)))];
 
   const filteredProducts = products.filter((product) => {
     const term = searchTerm.toLowerCase();
     const matchesSearch =
+      !term ||
       product.name.toLowerCase().includes(term) ||
       product.sku.toLowerCase().includes(term) ||
       product.barcode.toLowerCase().includes(term) ||
@@ -80,6 +83,10 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
 
     return matchesSearch && matchesCategory && matchesLowStock;
   });
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedProducts = filteredProducts.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   const getBatchQty = (productId: string) => batchQuantities[productId] || 1;
 
@@ -336,14 +343,14 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredProducts.length === 0 ? (
+              {paginatedProducts.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-slate-400">
                     No products matched your search or filters.
                   </td>
                 </tr>
               ) : (
-                filteredProducts.map((product) => {
+                paginatedProducts.map((product) => {
                   const stock = product.stocks[activeStore.id];
                   const currentQty = stock?.quantity ?? 0;
                   const threshold = stock?.minThreshold ?? 20;
@@ -532,6 +539,70 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
             </tbody>
           </table>
         </div>
+
+        {/* Pagination Controls for 10,000+ Items */}
+        {filteredProducts.length > 0 && (
+          <div className="px-4 py-3 border-t border-slate-200 bg-slate-50 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 text-slate-600 font-medium">
+              <span>
+                Menampilkan{' '}
+                <strong className="text-slate-900">
+                  {(safePage - 1) * pageSize + 1}–{Math.min(safePage * pageSize, filteredProducts.length)}
+                </strong>{' '}
+                dari <strong className="text-slate-900">{filteredProducts.length.toLocaleString('id-ID')}</strong> produk
+              </span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
+                className="ml-2 px-2 py-1 bg-white border border-slate-300 rounded-lg font-semibold text-slate-700"
+              >
+                <option value={50}>50 / hal</option>
+                <option value={100}>100 / hal</option>
+                <option value={250}>250 / hal</option>
+                <option value={500}>500 / hal</option>
+              </select>
+            </div>
+
+            {totalPages > 1 && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setCurrentPage(1)}
+                  disabled={safePage <= 1}
+                  className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 font-bold text-slate-700"
+                >
+                  &laquo; Awal
+                </button>
+                <button
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={safePage <= 1}
+                  className="px-3 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 font-bold text-slate-700"
+                >
+                  &lsaquo; Prev
+                </button>
+                <span className="px-3 py-1 font-bold text-slate-800 bg-emerald-50 border border-emerald-200 rounded-lg">
+                  Hal {safePage} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={safePage >= totalPages}
+                  className="px-3 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 font-bold text-slate-700"
+                >
+                  Next &rsaquo;
+                </button>
+                <button
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={safePage >= totalPages}
+                  className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 font-bold text-slate-700"
+                >
+                  Akhir &raquo;
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

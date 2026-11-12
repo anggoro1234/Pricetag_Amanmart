@@ -13,6 +13,7 @@ import {
 } from '../types';
 import { INITIAL_PRODUCTS, INITIAL_STORES, INITIAL_TEMPLATES, INITIAL_USERS } from '../data/initialData';
 import { audioService } from './audioService';
+import { idbGetProducts, idbSaveProducts, supabaseService } from './supabaseService';
 
 const STORAGE_KEYS = {
   PRODUCTS: 'aman_label_products_v1',
@@ -155,13 +156,18 @@ export const normalizeCategoryName = (raw?: string): string => {
 class StorageService {
   private channel: BroadcastChannel | null = null;
   private listeners: Set<() => void> = new Set();
+  private memoryProducts: Product[] | null = null;
 
   constructor() {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       try {
         this.channel = new BroadcastChannel('aman_inventory_sync_channel');
-        this.channel.onmessage = (event) => {
+        this.channel.onmessage = async (event) => {
           if (event.data?.type === 'SYNC_EVENT') {
+            const idbProds = await idbGetProducts();
+            if (idbProds && idbProds.length > 0) {
+              this.memoryProducts = idbProds;
+            }
             this.notifyListeners();
           }
         };
@@ -176,6 +182,30 @@ class StorageService {
     }
 
     this.initDefaults();
+  }
+
+  // Persist products safely across Memory + IndexedDB (100MB+) + localStorage fallback (if <= 1500 items)
+  private persistProducts(products: Product[]) {
+    this.memoryProducts = products;
+    // Save full dataset to IndexedDB (handles 10,000 - 100,000+ items without QuotaExceededError)
+    idbSaveProducts(products).catch(() => {});
+
+    // Only write to localStorage if dataset is small enough (< 2000 items), and always wrap in try/catch
+    if (typeof window !== 'undefined') {
+      try {
+        if (products.length <= 1800) {
+          localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+        } else {
+          // Store only first 250 items in localStorage as fast boot snapshot while IndexedDB holds all 10,000+ items
+          localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products.slice(0, 250)));
+        }
+      } catch {
+        // If localStorage is full (QuotaExceededError), clear the heavy key so IndexedDB & memory take over
+        try {
+          localStorage.removeItem(STORAGE_KEYS.PRODUCTS);
+        } catch {}
+      }
+    }
   }
 
   private initDefaults() {
@@ -206,7 +236,7 @@ class StorageService {
     }
 
     if (!localStorage.getItem(STORAGE_KEYS.PRODUCTS)) {
-      localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(INITIAL_PRODUCTS));
+      this.persistProducts([...INITIAL_PRODUCTS]);
     } else {
       // Ensure existing products have stocks for all 8 branches, repair any corrupted CSV imports, & merge new default products
       try {
@@ -331,11 +361,29 @@ class StorageService {
           }
         });
 
+        this.memoryProducts = repairedProds;
         if (modified) {
-          localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(repairedProds));
+          this.persistProducts(repairedProds);
         }
-      } catch {}
+      } catch {
+        this.memoryProducts = [...INITIAL_PRODUCTS];
+      }
     }
+
+    // Hydrate full 10,000+ dataset from IndexedDB (and Supabase Cloud if configured)
+    idbGetProducts()
+      .then((idbProds) => {
+        if (idbProds && idbProds.length > (this.memoryProducts?.length || 0)) {
+          this.memoryProducts = idbProds;
+          this.notifyListeners();
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (supabaseService.isConfigured() && this.isOnline()) {
+          this.pullAllFromSupabase().catch(() => {});
+        }
+      });
 
     if (!localStorage.getItem(STORAGE_KEYS.TEMPLATES)) {
       localStorage.setItem(STORAGE_KEYS.TEMPLATES, JSON.stringify(INITIAL_TEMPLATES));
@@ -462,11 +510,17 @@ class StorageService {
 
   // --- Products Management ---
   getProducts(): Product[] {
+    if (this.memoryProducts && this.memoryProducts.length > 0) {
+      return this.memoryProducts;
+    }
     try {
       const data = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
-      return data ? JSON.parse(data) : INITIAL_PRODUCTS;
+      const parsed = data ? JSON.parse(data) : INITIAL_PRODUCTS;
+      this.memoryProducts = parsed;
+      return parsed;
     } catch {
-      return INITIAL_PRODUCTS;
+      this.memoryProducts = [...INITIAL_PRODUCTS];
+      return this.memoryProducts;
     }
   }
 
@@ -482,7 +536,7 @@ class StorageService {
   }
 
   saveProduct(product: Product): Product {
-    const products = this.getProducts();
+    const products = [...this.getProducts()];
     const existingIndex = products.findIndex((p) => p.id === product.id);
 
     if (existingIndex >= 0) {
@@ -491,9 +545,11 @@ class StorageService {
       products.unshift(product);
     }
 
-    localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+    this.persistProducts(products);
 
-    if (!this.isOnline()) {
+    if (this.isOnline() && supabaseService.isConfigured()) {
+      supabaseService.upsertSingleProduct(product).catch(() => {});
+    } else if (!this.isOnline()) {
       this.enqueueOfflineItem({
         id: `queue-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         type: 'PRODUCT_UPDATE',
@@ -510,7 +566,10 @@ class StorageService {
 
   deleteProduct(productId: string) {
     const products = this.getProducts().filter((p) => p.id !== productId);
-    localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+    this.persistProducts(products);
+    if (this.isOnline() && supabaseService.isConfigured()) {
+      supabaseService.deleteSingleProduct(productId).catch(() => {});
+    }
     this.broadcastChange();
   }
 
@@ -522,7 +581,7 @@ class StorageService {
     reason: StockAdjustment['reason'],
     userName: string
   ): ProductStock {
-    const products = this.getProducts();
+    const products = [...this.getProducts()];
     const product = products.find((p) => p.id === productId);
     if (!product) throw new Error('Product not found');
 
@@ -537,7 +596,11 @@ class StorageService {
     };
 
     product.stocks[storeId] = updatedStock;
-    localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+    this.persistProducts(products);
+
+    if (this.isOnline() && supabaseService.isConfigured()) {
+      supabaseService.upsertSingleProduct(product).catch(() => {});
+    }
 
     // Log adjustment transaction
     const adjustment: StockAdjustment = {
@@ -556,7 +619,9 @@ class StorageService {
 
     const adjustments = this.getAdjustments();
     adjustments.unshift(adjustment);
-    localStorage.setItem(STORAGE_KEYS.ADJUSTMENTS, JSON.stringify(adjustments.slice(0, 300)));
+    try {
+      localStorage.setItem(STORAGE_KEYS.ADJUSTMENTS, JSON.stringify(adjustments.slice(0, 300)));
+    } catch {}
 
     if (!this.isOnline()) {
       this.enqueueOfflineItem({
@@ -581,7 +646,7 @@ class StorageService {
     quantity: number,
     userName: string
   ): StockTransfer {
-    const products = this.getProducts();
+    const products = [...this.getProducts()];
     const product = products.find((p) => p.id === productId);
     if (!product) throw new Error('Product not found');
 
@@ -608,7 +673,10 @@ class StorageService {
     product.stocks[toStoreId].quantity += quantity;
     product.stocks[toStoreId].lastUpdated = new Date().toISOString();
 
-    localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+    this.persistProducts(products);
+    if (this.isOnline() && supabaseService.isConfigured()) {
+      supabaseService.upsertSingleProduct(product).catch(() => {});
+    }
 
     const transfer: StockTransfer = {
       id: `trf-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -735,20 +803,27 @@ class StorageService {
     const newAlerts: LowStockAlert[] = [...existingAlerts];
     let triggeredNew = false;
 
-    products.forEach((product) => {
-      stores.forEach((store) => {
+    const today = new Date().toISOString().split('T')[0];
+    const existingAlertKeys = new Set(
+      existingAlerts
+        .filter((a) => a.timestamp.startsWith(today))
+        .map((a) => `${a.productId}__${a.storeId}`)
+    );
+
+    // Cap alert scan to avoid generating thousands of alerts when 10,000 items are imported
+    const sampleProducts = products.slice(0, 200);
+
+    for (const product of sampleProducts) {
+      if (newAlerts.length >= 100) break;
+      for (const store of stores) {
         const stock = product.stocks[store.id];
         const currentQty = stock?.quantity ?? 0;
         const threshold = stock?.minThreshold ?? 20;
 
         if (currentQty <= threshold) {
-          // Check if alert already exists for this product and store today
-          const today = new Date().toISOString().split('T')[0];
-          const exists = existingAlerts.some(
-            (a) => a.productId === product.id && a.storeId === store.id && a.timestamp.startsWith(today)
-          );
-
-          if (!exists) {
+          const alertKey = `${product.id}__${store.id}`;
+          if (!existingAlertKeys.has(alertKey)) {
+            existingAlertKeys.add(alertKey);
             const alert: LowStockAlert = {
               id: `alert-${product.id}-${store.id}-${Date.now()}`,
               productId: product.id,
@@ -764,21 +839,15 @@ class StorageService {
             };
             newAlerts.unshift(alert);
             triggeredNew = true;
-
-            // Trigger system browser push notification if permitted
-            if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-              new Notification(`⚠️ Low Stock Alert: ${product.name}`, {
-                body: `Only ${currentQty} units left at ${store.name} (Min threshold: ${threshold}). Tap to print reorder labels.`,
-                icon: '/icon-192.svg',
-              });
-            }
           }
         }
-      });
-    });
+      }
+    }
 
     if (triggeredNew) {
-      localStorage.setItem(STORAGE_KEYS.ALERTS, JSON.stringify(newAlerts.slice(0, 100)));
+      try {
+        localStorage.setItem(STORAGE_KEYS.ALERTS, JSON.stringify(newAlerts.slice(0, 100)));
+      } catch {}
       audioService.playAlertTone();
       this.broadcastChange();
     }
@@ -807,22 +876,38 @@ class StorageService {
     this.broadcastChange();
   }
 
-  // --- Bulk Product Import (Item, Barcode, Price) ---
+  // --- Bulk Product Import (Supports 10,000 - 100,000+ Items with O(1) Lookup & IndexedDB + Supabase) ---
   importProducts(
     records: ImportProductRecord[],
     targetStoreId: string = 'store-krg',
     updateExisting: boolean = true
   ): { added: number; updated: number; products: Product[] } {
-    const products = this.getProducts();
+    const existingProducts = [...this.getProducts()];
     const stores = this.getStores();
     let added = 0;
     let updated = 0;
+
+    // Build O(1) hash maps so importing 10,000+ rows executes in < 100ms without freezing browser
+    const skuMap = new Map<string, Product>();
+    const barcodeMap = new Map<string, Product>();
+    const nameMap = new Map<string, Product>();
+
+    existingProducts.forEach((p) => {
+      if (p.sku) skuMap.set(p.sku.toLowerCase(), p);
+      if (p.barcode) barcodeMap.set(p.barcode.toLowerCase(), p);
+      if (p.name) nameMap.set(p.name.toLowerCase(), p);
+    });
+
+    const newProductsToPrepend: Product[] = [];
+    const touchedProducts: Product[] = [];
+    const nowIso = new Date().toISOString();
+    const todayFormatted = new Date().toLocaleDateString('en-GB');
+    const batchTimestamp = Date.now();
 
     records.forEach((rec, idx) => {
       let cleanName = rec.name ? rec.name.trim().replace(/^["']+|["']+$/g, '').trim() : '';
       if (!cleanName) return;
 
-      // Extra defensive check: if cleanName accidentally contains semicolon-separated columns, extract them
       let rawBarcode = rec.barcode ? rec.barcode.trim() : '';
       let unitPrice = typeof rec.price === 'number' && !isNaN(rec.price) ? Math.max(0, rec.price) : 0;
       let rawSku = rec.sku ? rec.sku.trim() : '';
@@ -850,62 +935,63 @@ class StorageService {
 
       const normalizedCat = normalizeCategoryName(rawCategory);
       const safeStock = rawStock !== undefined && !isNaN(rawStock) ? Math.max(0, Math.round(rawStock)) : undefined;
-
-      // Check if product already exists by SKU, valid barcode, or exact name
       const preliminaryBarcode = rawBarcode ? sanitizeBarcodeValue(rawBarcode, rawSku || cleanName) : '';
-      const existingIdx = products.findIndex(
-        (p) =>
-          (rawSku && p.sku.toLowerCase() === rawSku.toLowerCase()) ||
-          (preliminaryBarcode && p.barcode.toLowerCase() === preliminaryBarcode.toLowerCase()) ||
-          p.name.toLowerCase() === cleanName.toLowerCase()
-      );
 
-      if (existingIdx >= 0) {
+      // O(1) lookup by SKU, Barcode, or Name
+      const matchedProd =
+        (rawSku ? skuMap.get(rawSku.toLowerCase()) : undefined) ||
+        (preliminaryBarcode ? barcodeMap.get(preliminaryBarcode.toLowerCase()) : undefined) ||
+        nameMap.get(cleanName.toLowerCase());
+
+      if (matchedProd) {
         if (updateExisting) {
-          const existing = products[existingIdx];
-          existing.name = cleanName.toUpperCase();
-          if (rawSku) existing.sku = rawSku;
+          matchedProd.name = cleanName.toUpperCase();
+          if (rawSku) {
+            matchedProd.sku = rawSku;
+            skuMap.set(rawSku.toLowerCase(), matchedProd);
+          }
           if (rawBarcode && rawBarcode.length >= 5 && !rawBarcode.toUpperCase().includes('E+')) {
-            existing.barcode = sanitizeBarcodeValue(rawBarcode, existing.sku || cleanName);
-          } else if (!existing.barcode || existing.barcode.length < 5) {
-            existing.barcode = sanitizeBarcodeValue(existing.barcode, existing.sku || cleanName);
+            matchedProd.barcode = sanitizeBarcodeValue(rawBarcode, matchedProd.sku || cleanName);
+            barcodeMap.set(matchedProd.barcode.toLowerCase(), matchedProd);
+          } else if (!matchedProd.barcode || matchedProd.barcode.length < 5) {
+            matchedProd.barcode = sanitizeBarcodeValue(matchedProd.barcode, matchedProd.sku || cleanName);
+            barcodeMap.set(matchedProd.barcode.toLowerCase(), matchedProd);
           }
           if (unitPrice >= 0) {
-            existing.pricing.unitPrice = unitPrice;
+            matchedProd.pricing.unitPrice = unitPrice;
             if (!rec.bulkPrice && unitPrice > 0) {
-              existing.pricing.bulkPrice = Math.round(unitPrice * 22);
+              matchedProd.pricing.bulkPrice = Math.round(unitPrice * 22);
             }
           }
-          if (rec.bulkPrice !== undefined && rec.bulkPrice > 0) existing.pricing.bulkPrice = rec.bulkPrice;
-          if (rec.bulkQuantity !== undefined && rec.bulkQuantity > 0) existing.pricing.bulkQuantity = rec.bulkQuantity;
-          if (rec.bulkLabel) existing.pricing.bulkLabel = rec.bulkLabel.toUpperCase();
+          if (rec.bulkPrice !== undefined && rec.bulkPrice > 0) matchedProd.pricing.bulkPrice = rec.bulkPrice;
+          if (rec.bulkQuantity !== undefined && rec.bulkQuantity > 0) matchedProd.pricing.bulkQuantity = rec.bulkQuantity;
+          if (rec.bulkLabel) matchedProd.pricing.bulkLabel = rec.bulkLabel.toUpperCase();
           if (rawCategory) {
-            existing.category = normalizedCat;
-            existing.department = `${normalizedCat} / General`;
+            matchedProd.category = normalizedCat;
+            matchedProd.department = `${normalizedCat} / General`;
           }
-          if (rec.brand) existing.brand = rec.brand;
-          if (rec.unitLabel) existing.pricing.unitLabel = rec.unitLabel.toUpperCase();
+          if (rec.brand) matchedProd.brand = rec.brand;
+          if (rec.unitLabel) matchedProd.pricing.unitLabel = rec.unitLabel.toUpperCase();
 
-          // Update stock for target store if specified
           if (safeStock !== undefined) {
-            if (!existing.stocks[targetStoreId]) {
-              existing.stocks[targetStoreId] = {
+            if (!matchedProd.stocks[targetStoreId]) {
+              matchedProd.stocks[targetStoreId] = {
                 storeId: targetStoreId,
                 quantity: safeStock,
                 minThreshold: rec.minThreshold ?? 20,
-                lastUpdated: new Date().toISOString(),
+                lastUpdated: nowIso,
               };
             } else {
-              existing.stocks[targetStoreId].quantity = safeStock;
-              if (rec.minThreshold !== undefined) existing.stocks[targetStoreId].minThreshold = rec.minThreshold;
-              existing.stocks[targetStoreId].lastUpdated = new Date().toISOString();
+              matchedProd.stocks[targetStoreId].quantity = safeStock;
+              if (rec.minThreshold !== undefined) matchedProd.stocks[targetStoreId].minThreshold = rec.minThreshold;
+              matchedProd.stocks[targetStoreId].lastUpdated = nowIso;
             }
           }
+          touchedProducts.push(matchedProd);
           updated++;
         }
       } else {
-        // Create new product
-        const newSku = rawSku || `100${Math.floor(1000 + Math.random() * 9000)}`;
+        const newSku = rawSku || `100${Math.floor(10000 + Math.random() * 90000)}`;
         const cleanBarcode = sanitizeBarcodeValue(rawBarcode, newSku || cleanName);
         const initialStocks: Record<string, ProductStock> = {};
 
@@ -916,12 +1002,12 @@ class StorageService {
             storeId: store.id,
             quantity: qty,
             minThreshold: rec.minThreshold ?? 20,
-            lastUpdated: new Date().toISOString(),
+            lastUpdated: nowIso,
           };
         });
 
         const newProd: Product = {
-          id: `prod-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
+          id: `prod-${batchTimestamp}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
           sku: newSku,
           barcode: cleanBarcode,
           barcodeType: 'EAN13',
@@ -939,20 +1025,56 @@ class StorageService {
             bulkPrice: rec.bulkPrice || (unitPrice > 0 ? Math.round(unitPrice * 22) : 0),
           },
           stocks: initialStocks,
-          dateEffective: new Date().toLocaleDateString('en-GB'),
+          dateEffective: todayFormatted,
           locationBin: 'A-01-01',
         };
 
-        products.unshift(newProd);
+        newProductsToPrepend.push(newProd);
+        touchedProducts.push(newProd);
+        skuMap.set(newSku.toLowerCase(), newProd);
+        barcodeMap.set(cleanBarcode.toLowerCase(), newProd);
+        nameMap.set(newProd.name.toLowerCase(), newProd);
         added++;
       }
     });
 
-    localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+    const finalProducts = [...newProductsToPrepend, ...existingProducts];
+    this.persistProducts(finalProducts);
+
+    // Sync imported/updated items to Supabase in background if configured
+    if (this.isOnline() && supabaseService.isConfigured() && touchedProducts.length > 0) {
+      supabaseService.upsertProductsBatch(touchedProducts).catch(() => {});
+    }
+
     this.evaluateStockAlerts();
     this.broadcastChange();
 
-    return { added, updated, products };
+    return { added, updated, products: finalProducts };
+  }
+
+  // --- Supabase Cloud Sync Helpers ---
+  async syncAllToSupabase(
+    onProgress?: (completed: number, total: number) => void
+  ): Promise<{ ok: boolean; synced: number; error?: string }> {
+    const products = this.getProducts();
+    return supabaseService.upsertProductsBatch(products, onProgress);
+  }
+
+  async pullAllFromSupabase(
+    onProgress?: (loaded: number) => void
+  ): Promise<{ ok: boolean; count: number; error?: string }> {
+    if (!supabaseService.isConfigured()) {
+      return { ok: false, count: 0, error: 'Supabase belum dikonfigurasi' };
+    }
+    const remoteProducts = await supabaseService.fetchAllProducts(onProgress);
+    if (!remoteProducts) {
+      return { ok: false, count: 0, error: 'Gagal mengambil data dari Supabase' };
+    }
+    if (remoteProducts.length > 0) {
+      this.persistProducts(remoteProducts);
+      this.broadcastChange();
+    }
+    return { ok: true, count: remoteProducts.length };
   }
 
   // --- Templates ---

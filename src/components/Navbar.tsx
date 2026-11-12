@@ -170,13 +170,14 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </button>
 
-          {/* Cloud Deploy Guide */}
+          {/* Supabase Database & Cloud Deploy Guide */}
           <button
             onClick={onOpenDeployGuide}
-            className="hidden sm:flex p-2 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-200 transition border border-emerald-800/60"
-            title="Cloud Deployment (AWS, Vercel, PWA)"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-200 transition border border-emerald-800/60 text-xs font-bold"
+            title="Integrasi Database Supabase (10.000+ Item) & Cloud Deployment"
           >
-            <Cloud className="w-4 h-4" />
+            <Cloud className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="hidden lg:inline whitespace-nowrap">Supabase DB</span>
           </button>
 
           {/* User Profile / RBAC Switcher */}

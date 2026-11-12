@@ -440,7 +440,8 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                   Produk tidak ditemukan pada kategori ini.
                 </div>
               ) : (
-                filteredCatalog.map((prod) => {
+                <>
+                  {filteredCatalog.slice(0, 120).map((prod) => {
                   const inQueueItem = queue.find((q) => q.product.id === prod.id);
                   return (
                     <div
@@ -497,7 +498,13 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                       </button>
                     </div>
                   );
-                })
+                })}
+                  {filteredCatalog.length > 120 && (
+                    <div className="p-2 text-center text-[11px] text-slate-500 bg-white rounded-lg border border-slate-200">
+                      Menampilkan 120 dari {filteredCatalog.length.toLocaleString('id-ID')} item. Gunakan kolom pencarian di atas untuk mencari item lainnya.
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>

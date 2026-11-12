@@ -34,12 +34,44 @@ export const StockSyncMatrix: React.FC<StockSyncMatrixProps> = ({
   userName,
 }) => {
   const [activeTab, setActiveTab] = useState<'matrix' | 'transfers' | 'audit'>('matrix');
+  const [matrixSearch, setMatrixSearch] = useState<string>('');
+  const [matrixPage, setMatrixPage] = useState<number>(1);
+  const MATRIX_PAGE_SIZE = 100;
   const [transferModalOpen, setTransferModalOpen] = useState<boolean>(false);
+  const [transferProductSearch, setTransferProductSearch] = useState<string>('');
   const [selectedProductId, setSelectedProductId] = useState<string>(products[0]?.id || '');
   const [fromStoreId, setFromStoreId] = useState<string>(stores[0]?.id || '');
   const [toStoreId, setToStoreId] = useState<string>(stores[1]?.id || '');
   const [transferQty, setTransferQty] = useState<number>(10);
   const [transferSuccess, setTransferSuccess] = useState<string | null>(null);
+
+  const filteredMatrixProducts = products.filter((p) => {
+    if (!matrixSearch.trim()) return true;
+    const q = matrixSearch.toLowerCase();
+    return (
+      p.name.toLowerCase().includes(q) ||
+      p.sku.toLowerCase().includes(q) ||
+      p.barcode.includes(q)
+    );
+  });
+  const totalMatrixPages = Math.max(1, Math.ceil(filteredMatrixProducts.length / MATRIX_PAGE_SIZE));
+  const safeMatrixPage = Math.min(matrixPage, totalMatrixPages);
+  const paginatedMatrixProducts = filteredMatrixProducts.slice(
+    (safeMatrixPage - 1) * MATRIX_PAGE_SIZE,
+    safeMatrixPage * MATRIX_PAGE_SIZE
+  );
+
+  const filteredTransferProducts = products
+    .filter((p) => {
+      if (!transferProductSearch.trim()) return true;
+      const q = transferProductSearch.toLowerCase();
+      return (
+        p.name.toLowerCase().includes(q) ||
+        p.sku.toLowerCase().includes(q) ||
+        p.barcode.includes(q)
+      );
+    })
+    .slice(0, 200);
 
   const transfers = storageService.getTransfers();
   const adjustments = storageService.getAdjustments();
@@ -157,6 +189,57 @@ export const StockSyncMatrix: React.FC<StockSyncMatrixProps> = ({
       {/* Tab 1: Matrix View */}
       {activeTab === 'matrix' && (
         <div className="bg-white rounded-b-2xl border border-slate-200 shadow-xs overflow-hidden">
+          <div className="p-3 sm:p-4 border-b border-slate-200 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <input
+              type="text"
+              value={matrixSearch}
+              onChange={(e) => {
+                setMatrixSearch(e.target.value);
+                setMatrixPage(1);
+              }}
+              placeholder="Search item name, SKU, or barcode across matrix..."
+              className="w-full sm:max-w-sm px-3 py-2 border border-slate-300 rounded-xl text-xs font-medium bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <div className="flex items-center justify-between sm:justify-end gap-2 text-xs text-slate-600">
+              <span>
+                Showing{' '}
+                <strong className="text-slate-900">
+                  {filteredMatrixProducts.length === 0
+                    ? 0
+                    : (safeMatrixPage - 1) * MATRIX_PAGE_SIZE + 1}
+                </strong>
+                –
+                <strong className="text-slate-900">
+                  {Math.min(safeMatrixPage * MATRIX_PAGE_SIZE, filteredMatrixProducts.length)}
+                </strong>{' '}
+                of{' '}
+                <strong className="text-slate-900">
+                  {filteredMatrixProducts.length.toLocaleString('id-ID')}
+                </strong>
+              </span>
+              {totalMatrixPages > 1 && (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setMatrixPage((p) => Math.max(1, p - 1))}
+                    disabled={safeMatrixPage <= 1}
+                    className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white font-bold disabled:opacity-40"
+                  >
+                    Prev
+                  </button>
+                  <span className="px-2 py-1 font-bold text-indigo-700 bg-indigo-50 rounded-lg">
+                    {safeMatrixPage}/{totalMatrixPages}
+                  </span>
+                  <button
+                    onClick={() => setMatrixPage((p) => Math.min(totalMatrixPages, p + 1))}
+                    disabled={safeMatrixPage >= totalMatrixPages}
+                    className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white font-bold disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-xs">
               <thead>
@@ -177,7 +260,7 @@ export const StockSyncMatrix: React.FC<StockSyncMatrixProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {products.map((product) => {
+                {paginatedMatrixProducts.map((product) => {
                   const total = (Object.values(product.stocks) as ProductStock[]).reduce(
                     (sum, s) => sum + s.quantity,
                     0
@@ -397,12 +480,31 @@ export const StockSyncMatrix: React.FC<StockSyncMatrixProps> = ({
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
                   Select Product
                 </label>
+                {products.length > 50 && (
+                  <input
+                    type="text"
+                    value={transferProductSearch}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setTransferProductSearch(val);
+                      const firstMatch = products.find(
+                        (p) =>
+                          p.name.toLowerCase().includes(val.toLowerCase()) ||
+                          p.sku.toLowerCase().includes(val.toLowerCase()) ||
+                          p.barcode.includes(val)
+                      );
+                      if (firstMatch) setSelectedProductId(firstMatch.id);
+                    }}
+                    placeholder="Filter product by name, SKU, or barcode..."
+                    className="w-full px-3 py-1.5 mb-2 border border-slate-300 rounded-xl text-xs"
+                  />
+                )}
                 <select
                   value={selectedProductId}
                   onChange={(e) => setSelectedProductId(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-semibold"
                 >
-                  {products.map((p) => (
+                  {filteredTransferProducts.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name} (SKU: {p.sku})
                     </option>
