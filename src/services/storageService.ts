@@ -587,10 +587,38 @@ class StorageService {
   }
 
   findProductByBarcode(barcode: string): Product | undefined {
-    const clean = barcode.trim().toLowerCase();
-    return this.getProducts().find(
-      (p) => p.barcode.toLowerCase() === clean || p.sku.toLowerCase() === clean
+    const clean = barcode
+      .replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '')
+      .trim()
+      .toLowerCase();
+    if (!clean) return undefined;
+
+    const products = this.getProducts();
+
+    // 1. Exact match on barcode or SKU
+    const exactMatch = products.find(
+      (p) =>
+        p.barcode.trim().toLowerCase() === clean ||
+        p.sku.trim().toLowerCase() === clean
     );
+    if (exactMatch) return exactMatch;
+
+    // 2. Fallback for UPC-A / EAN-13 leading-zero differences between laptop & Android PDA scanners
+    if (/^\d{6,}$/.test(clean)) {
+      const strippedClean = clean.replace(/^0+/, '');
+      if (strippedClean.length >= 6) {
+        return products.find((p) => {
+          const b = p.barcode.trim().toLowerCase();
+          if (/^\d{6,}$/.test(b) && b.replace(/^0+/, '') === strippedClean) {
+            return true;
+          }
+          const s = p.sku.trim().toLowerCase();
+          return /^\d{6,}$/.test(s) && s.replace(/^0+/, '') === strippedClean;
+        });
+      }
+    }
+
+    return undefined;
   }
 
   saveProduct(product: Product): Product {

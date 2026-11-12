@@ -168,13 +168,20 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
   );
 
   const filteredProducts = useMemo(() => {
-    const term = searchTerm.trim().toLowerCase();
+    const term = searchTerm
+      .replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '')
+      .trim()
+      .toLowerCase();
+    const numericNoZero = /^\d{6,}$/.test(term) ? term.replace(/^0+/, '') : '';
+
     return products.filter((product) => {
       const matchesSearch =
         !term ||
         product.name.toLowerCase().includes(term) ||
         product.sku.toLowerCase().includes(term) ||
         product.barcode.toLowerCase().includes(term) ||
+        (numericNoZero.length >= 6 &&
+          product.barcode.trim().replace(/^0+/, '').toLowerCase() === numericNoZero) ||
         product.brand.toLowerCase().includes(term) ||
         product.category.toLowerCase().includes(term);
 
@@ -361,9 +368,28 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder="Search by Name, SKU, Barcode, Brand..."
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="Search or PDA Scan Name, SKU, Barcode..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => {
+              const cleaned = e.target.value.replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '');
+              setSearchTerm(cleaned);
+            }}
+            onPaste={(e) => {
+              const pasted = e.clipboardData?.getData('text');
+              if (pasted) {
+                e.preventDefault();
+                const cleaned = pasted.replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '').trim();
+                setSearchTerm(cleaned);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Tab' && searchTerm.trim().length >= 3) {
+                e.preventDefault();
+              }
+            }}
             className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none"
           />
         </div>
