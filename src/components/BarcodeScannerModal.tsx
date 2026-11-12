@@ -54,9 +54,8 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [wedgeBuffer, setWedgeBuffer] = useState<string>('');
-  const [pdaCaptureValue, setPdaCaptureValue] = useState<string>('');
   const [autoSubmitNoEnter, setAutoSubmitNoEnter] = useState<boolean>(true);
-  const [allowVirtualKeyboard, setAllowVirtualKeyboard] = useState<boolean>(false);
+  const [allowVirtualKeyboard, setAllowVirtualKeyboard] = useState<boolean>(true);
   const [lastSignalInfo, setLastSignalInfo] = useState<string>('Menunggu sinyal dari scanner PDA / USB...');
   const [clipboardError, setClipboardError] = useState<string | null>(null);
   const [lastScanTime, setLastScanTime] = useState<string>('');
@@ -71,7 +70,9 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const lastScanTimestampRef = useRef<number>(0);
   const lastScanCodeRef = useRef<string>('');
   const autoSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const globalBurstTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleBarcodeDetectedRef = useRef<(rawCode: string, source?: string) => void>(() => {});
+  const submitPdaBufferRef = useRef<(rawValue: string, source: string) => void>(() => {});
   const selectedTemplate = templates[0];
 
   // Detect Android / Mobile Data Terminal and sync catalog count on modal open
@@ -88,38 +89,102 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         clearTimeout(autoSubmitTimerRef.current);
         autoSubmitTimerRef.current = null;
       }
+      if (globalBurstTimerRef.current) {
+        clearTimeout(globalBurstTimerRef.current);
+        globalBurstTimerRef.current = null;
+      }
     }
   }, [isOpen]);
 
   // Keep PDA capture input focused when Hardware PDA / USB tab is active
   const focusPdaInput = useCallback(() => {
     if (!isOpen || activeTab !== 'usb_wedge') return;
-    setTimeout(() => {
-      pdaInputRef.current?.focus({ preventScroll: true });
-    }, 60);
+    requestAnimationFrame(() => {
+      if (pdaInputRef.current && document.activeElement !== pdaInputRef.current) {
+        pdaInputRef.current.focus({ preventScroll: true });
+      }
+    });
   }, [isOpen, activeTab]);
 
   useEffect(() => {
-    focusPdaInput();
-  }, [focusPdaInput]);
+    if (!isOpen || activeTab !== 'usb_wedge') return;
+    const t = setTimeout(focusPdaInput, 60);
+    const handleWindowFocus = () => focusPdaInput();
+    const handleVisibility = () => {
+      if (!document.hidden) focusPdaInput();
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [isOpen, activeTab, focusPdaInput]);
 
-  // Hardware USB / Bluetooth Scanner Keyboard Wedge Global Listener
-  // Mendukung HID keyboard (laptop) serta mencegah konflik dengan input PDA/manual terfokus
+  // Capture Android WebKit/Chromium 'textInput' events on PDA input for OEM ScanWedge IME commits
+  useEffect(() => {
+    const inputEl = pdaInputRef.current;
+    if (!isOpen || activeTab !== 'usb_wedge' || !inputEl) return;
+
+    const handleNativeTextInput = (ev: Event) => {
+      const data = (ev as unknown as { data?: string }).data;
+      if (!data) return;
+      if (/[\r\n\t]/.test(data)) {
+        setTimeout(() => {
+          const val = pdaInputRef.current?.value || data;
+          submitPdaBufferRef.current(val, 'PDA TextInput+Enter');
+        }, 0);
+      } else {
+        setLastSignalInfo(`TextInput(${data.length}): "${sanitizeScanString(data)}"`);
+      }
+    };
+
+    inputEl.addEventListener('textInput', handleNativeTextInput);
+    return () => {
+      inputEl.removeEventListener('textInput', handleNativeTextInput);
+    };
+  }, [isOpen, activeTab]);
+
+  // Hardware USB / Android PDA Global Capture Listener (capture phase)
+  // Menangkap HID keyboard maupun Android KeyEvent apabila fokus sempat lepas dari kotak input
   useEffect(() => {
     if (!isOpen) return;
 
     let buffer = '';
     let lastKeyTime = Date.now();
-    let scanInProgress = false;
+
+    const mapFallbackKeyChar = (e: KeyboardEvent): string => {
+      if (e.key && e.key.length === 1) return e.key;
+      const kc = e.keyCode || e.which;
+      if (kc >= 48 && kc <= 57) return String.fromCharCode(kc);
+      if (kc >= 96 && kc <= 105) return String.fromCharCode(kc - 48);
+      if (kc >= 65 && kc <= 90) return String.fromCharCode(kc);
+      if (kc === 189 || kc === 109) return '-';
+      return '';
+    };
+
+    const flushGlobalBuffer = (source: string) => {
+      if (globalBurstTimerRef.current) {
+        clearTimeout(globalBurstTimerRef.current);
+        globalBurstTimerRef.current = null;
+      }
+      const code = sanitizeScanString(buffer);
+      buffer = '';
+      if (code.length >= 3) {
+        handleBarcodeDetectedRef.current(code, source);
+      }
+    };
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      // Biarkan PDA Capture Input & Manual Input menangani event-nya sendiri via onChange/onInput/onKeyDown
+      // Jika fokus berada di PDA capture input atau input lain, biarkan handler input tersebut memprosesnya
       if (
         target &&
         (target === pdaInputRef.current ||
           target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA')
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT')
       ) {
         return;
       }
@@ -127,39 +192,56 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       const now = Date.now();
       const diff = now - lastKeyTime;
       lastKeyTime = now;
+      const kc = e.keyCode || e.which;
 
-      if (e.key === 'Enter' || e.key === 'Tab') {
+      if (e.key === 'Enter' || e.key === 'Tab' || e.key === 'NumpadEnter' || kc === 13 || kc === 66) {
         if (buffer.length >= 3) {
           e.preventDefault();
-          const finalCode = buffer;
-          buffer = '';
-          scanInProgress = false;
-          handleBarcodeDetectedRef.current(finalCode, `HID Global (${e.key})`);
+          e.stopPropagation();
+          flushGlobalBuffer(`Global Key (${e.key || kc})`);
         } else {
           buffer = '';
-          scanInProgress = false;
         }
         return;
       }
 
-      // Abaikan tombol kontrol/modifier atau Unidentified (IME Android memerlukan fokus ke <input>)
-      if (e.key.length > 1) {
+      const ch = mapFallbackKeyChar(e);
+      if (!ch) {
+        if (e.key === 'Unidentified' || kc === 229) {
+          setLastSignalInfo(`Global Unidentified (code=${kc}) - memfokuskan kotak scan...`);
+          if (activeTab === 'usb_wedge') {
+            pdaInputRef.current?.focus({ preventScroll: true });
+          }
+        }
         return;
       }
 
-      if (diff > 180 && buffer.length > 0 && !scanInProgress) {
+      if (diff > 200 && buffer.length > 0) {
         buffer = '';
       }
 
-      scanInProgress = true;
-      buffer += e.key;
+      buffer += ch;
+      setLastSignalInfo(`Global KeyBurst: "${buffer}"`);
+
+      if (globalBurstTimerRef.current) {
+        clearTimeout(globalBurstTimerRef.current);
+      }
+      globalBurstTimerRef.current = setTimeout(() => {
+        if (buffer.length >= 4) {
+          flushGlobalBuffer('Global Auto-Capture');
+        }
+      }, 200);
     };
 
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
+      if (globalBurstTimerRef.current) {
+        clearTimeout(globalBurstTimerRef.current);
+        globalBurstTimerRef.current = null;
+      }
     };
-  }, [isOpen]);
+  }, [isOpen, activeTab]);
 
   // Camera Barcode Scanning with ZXing
   useEffect(() => {
@@ -290,18 +372,25 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
   handleBarcodeDetectedRef.current = handleBarcodeDetected;
 
-  const submitPdaBuffer = (rawValue: string, source: string) => {
-    if (autoSubmitTimerRef.current) {
-      clearTimeout(autoSubmitTimerRef.current);
-      autoSubmitTimerRef.current = null;
-    }
-    const clean = sanitizeScanString(rawValue);
-    setPdaCaptureValue('');
-    if (clean.length >= 2) {
-      handleBarcodeDetected(clean, source);
-    }
-    focusPdaInput();
-  };
+  const submitPdaBuffer = useCallback(
+    (rawValue: string, source: string) => {
+      if (autoSubmitTimerRef.current) {
+        clearTimeout(autoSubmitTimerRef.current);
+        autoSubmitTimerRef.current = null;
+      }
+      const clean = sanitizeScanString(rawValue);
+      if (pdaInputRef.current) {
+        pdaInputRef.current.value = '';
+      }
+      if (clean.length >= 2) {
+        handleBarcodeDetectedRef.current(clean, source);
+      }
+      focusPdaInput();
+    },
+    [focusPdaInput]
+  );
+
+  submitPdaBufferRef.current = submitPdaBuffer;
 
   const handlePdaInputChange = (rawValue: string) => {
     setClipboardError(null);
@@ -312,10 +401,8 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     }
 
     const clean = sanitizeScanString(rawValue);
-    setPdaCaptureValue(clean);
-
     if (clean.length > 0) {
-      setLastSignalInfo(`Input PDA masuk: "${clean}"`);
+      setLastSignalInfo(`Input PDA(${clean.length}): "${clean}"`);
     }
 
     // Auto-submit untuk PDA Android yang TIDAK mengirim tombol Enter setelah scan selesai
@@ -326,8 +413,9 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
     if (autoSubmitNoEnter && clean.length >= 4) {
       autoSubmitTimerRef.current = setTimeout(() => {
-        submitPdaBuffer(clean, 'PDA Auto-Capture');
-      }, 170);
+        const liveVal = pdaInputRef.current?.value || clean;
+        submitPdaBuffer(liveVal, 'PDA Auto-Capture');
+      }, 180);
     }
   };
 
@@ -533,7 +621,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 </span>
               </div>
 
-              {/* Dedicated Focusable Capture Input (NEVER readOnly so Android ScanWedge IME CommitText works) */}
+              {/* Dedicated Focusable Capture Input (Uncontrolled DOM ref + inputMode="text" default so Android DT338b ScanWedge IME CommitText works reliably) */}
               <div className="bg-white border-2 border-emerald-500 rounded-xl p-3 shadow-xs space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <label
@@ -545,6 +633,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                   </label>
                   <button
                     type="button"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={(e) => {
                       e.stopPropagation();
                       setAllowVirtualKeyboard((prev) => !prev);
@@ -552,26 +641,34 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                     }}
                     className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 underline"
                   >
-                    {allowVirtualKeyboard ? 'Sembunyikan Keyboard HP' : 'Buka Keyboard HP'}
+                    {allowVirtualKeyboard ? 'Mode PDA: Teks/IME (Sembunyikan Keyboard)' : 'Mode PDA: None (Aktifkan Teks/IME)'}
                   </button>
                 </div>
 
-                <div className="flex flex-col sm:flex-row gap-2">
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const liveVal = pdaInputRef.current?.value || '';
+                    submitPdaBuffer(liveVal, 'PDA Form Submit');
+                  }}
+                  className="flex flex-col sm:flex-row gap-2"
+                >
                   <input
                     id="pda-capture-input"
                     ref={pdaInputRef}
                     type="text"
+                    defaultValue=""
                     inputMode={allowVirtualKeyboard ? 'text' : 'none'}
+                    enterKeyHint="search"
                     autoFocus
                     autoComplete="off"
                     autoCorrect="off"
                     autoCapitalize="off"
                     spellCheck={false}
                     placeholder="Arahkan laser PDA ke barcode & tekan tombol orange..."
-                    value={pdaCaptureValue}
-                    onChange={(e) => handlePdaInputChange(e.target.value)}
+                    onInput={(e) => handlePdaInputChange((e.target as HTMLInputElement).value)}
                     onCompositionEnd={(e) => {
-                      const val = (e.target as HTMLInputElement).value;
+                      const val = (e.currentTarget as HTMLInputElement).value;
                       if (val) {
                         handlePdaInputChange(val);
                       }
@@ -584,16 +681,29 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                       }
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === 'Tab') {
+                      const kc = e.keyCode || e.which;
+                      if (e.key === 'Enter' || e.key === 'Tab' || e.key === 'NumpadEnter' || kc === 13 || kc === 66) {
                         e.preventDefault();
-                        submitPdaBuffer(pdaCaptureValue, `PDA Key (${e.key})`);
+                        submitPdaBuffer(e.currentTarget.value, `PDA Key (${e.key || kc})`);
+                      } else if (e.key === 'Unidentified' || kc === 229) {
+                        setLastSignalInfo(`IME KeyDown(229) terdeteksi, membaca input...`);
                       }
+                    }}
+                    onBlur={() => {
+                      setTimeout(() => {
+                        if (!isOpen || activeTab !== 'usb_wedge') return;
+                        const active = document.activeElement as HTMLElement | null;
+                        if (!active || active === document.body) {
+                          focusPdaInput();
+                        }
+                      }, 80);
                     }}
                     className="flex-1 px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-sm font-mono text-slate-900 focus:ring-2 focus:ring-emerald-500 focus:bg-white focus:outline-none"
                   />
                   <div className="flex gap-2">
                     <button
                       type="button"
+                      onMouseDown={(e) => e.preventDefault()}
                       onClick={(e) => {
                         e.stopPropagation();
                         focusPdaInput();
@@ -606,6 +716,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                     </button>
                     <button
                       type="button"
+                      onMouseDown={(e) => e.preventDefault()}
                       onClick={(e) => {
                         e.stopPropagation();
                         handlePasteClipboard();
@@ -617,7 +728,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                       Tempel Clipboard
                     </button>
                   </div>
-                </div>
+                </form>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-slate-600">
                   <label
