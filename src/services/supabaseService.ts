@@ -186,6 +186,11 @@ const ensureValidBarcode = (rawBc: string, seed: string): string => {
   return clean;
 };
 
+const toSafeInt = (val: any, fallback: number = 0): number => {
+  const n = Number(val);
+  return Number.isFinite(n) ? Math.max(0, Math.round(n)) : fallback;
+};
+
 const mapProductToRow = (p: Product): SupabaseProductRow => ({
   id: p.id || `prod-${p.sku || Date.now()}`,
   sku: p.sku || '',
@@ -196,12 +201,12 @@ const mapProductToRow = (p: Product): SupabaseProductRow => ({
   brand: p.brand || 'General',
   department: p.department || `${p.category || 'Grocery'} / General`,
   currency: p.currency || 'Rp.',
-  unit_price: Math.round(Number(p.pricing?.unitPrice ?? 0)),
+  unit_price: toSafeInt(p.pricing?.unitPrice, 0),
   unit_label: p.pricing?.unitLabel || 'PCS',
-  unit_quantity: Number(p.pricing?.unitQuantity ?? 1),
-  bulk_price: Math.round(Number(p.pricing?.bulkPrice ?? 0)),
+  unit_quantity: toSafeInt(p.pricing?.unitQuantity, 1) || 1,
+  bulk_price: toSafeInt(p.pricing?.bulkPrice, 0),
   bulk_label: p.pricing?.bulkLabel || 'CRT',
-  bulk_quantity: Number(p.pricing?.bulkQuantity ?? 24),
+  bulk_quantity: toSafeInt(p.pricing?.bulkQuantity, 24) || 24,
   stocks: p.stocks || {},
   promotional_discount: p.promotionalDiscount || null,
   date_effective: p.dateEffective || new Date().toLocaleDateString('en-GB'),
@@ -511,39 +516,75 @@ class SupabaseService {
     return res.products;
   }
 
-  // Upsert 10,000+ products in safe batches of 400 rows per HTTP request
+  // Upsert 10,000+ products in safe batches of 400 rows per HTTP request (deduplicated by id to prevent ON CONFLICT errors)
   async upsertProductsBatch(
     products: Product[],
     onProgress?: (completed: number, total: number) => void
-  ): Promise<{ ok: boolean; synced: number; error?: string }> {
+  ): Promise<{ ok: boolean; synced: number; syncedIds?: string[]; error?: string }> {
     if (!this.isConfigured()) {
-      return { ok: false, synced: 0, error: 'Supabase belum dikonfigurasi' };
+      return { ok: false, synced: 0, syncedIds: [], error: 'Supabase belum dikonfigurasi' };
     }
+
+    // Deduplicate by resolved row id (last wins) so Postgres never hits 21000 ON CONFLICT duplicate row error
+    const dedupMap = new Map<string, SupabaseProductRow>();
+    for (const prod of products) {
+      const row = mapProductToRow(prod);
+      if (row.id) {
+        dedupMap.set(row.id, row);
+      }
+    }
+    const uniqueRows = Array.from(dedupMap.values());
 
     const cfg = this.getConfig();
     const batchSize = 400;
-    const total = products.length;
+    const total = uniqueRows.length;
     let synced = 0;
+    const syncedIds: string[] = [];
 
     try {
       for (let i = 0; i < total; i += batchSize) {
-        const chunk = products.slice(i, i + batchSize).map(mapProductToRow);
+        const chunk = uniqueRows.slice(i, i + batchSize);
 
-        const resp = await this.requestWithKeyFallback(
-          `${cfg.url}/rest/v1/products?on_conflict=id`,
-          cfg.anonKey,
-          {
-            method: 'POST',
-            body: JSON.stringify(chunk),
-          },
-          {
-            'Content-Type': 'application/json',
-            Prefer: 'resolution=merge-duplicates,return=minimal',
+        let resp: Response | null = null;
+        let lastErrText = '';
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            resp = await this.requestWithKeyFallback(
+              `${cfg.url}/rest/v1/products?on_conflict=id`,
+              cfg.anonKey,
+              {
+                method: 'POST',
+                body: JSON.stringify(chunk),
+              },
+              {
+                'Content-Type': 'application/json',
+                Prefer: 'resolution=merge-duplicates,return=minimal',
+              }
+            );
+            if (resp.ok || (resp.status !== 429 && resp.status < 500)) {
+              break;
+            }
+            lastErrText = await resp.text();
+          } catch (netErr: any) {
+            lastErrText = netErr?.message || 'Network error during batch upload';
+            resp = null;
           }
-        );
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+          }
+        }
+
+        if (!resp) {
+          return {
+            ok: false,
+            synced,
+            syncedIds,
+            error: lastErrText || 'Koneksi terputus saat mengirim batch ke Supabase',
+          };
+        }
 
         if (!resp.ok) {
-          const errText = await resp.text();
+          const errText = lastErrText || (await resp.text());
           if (
             resp.status === 404 ||
             errText.includes('relation') ||
@@ -553,6 +594,7 @@ class SupabaseService {
             return {
               ok: false,
               synced,
+              syncedIds,
               error:
                 'Tabel "public.products" belum dibuat di Supabase. Silakan jalankan SQL Schema di menu SQL Editor Supabase Anda terlebih dahulu.',
             };
@@ -560,10 +602,14 @@ class SupabaseService {
           return {
             ok: false,
             synced,
+            syncedIds,
             error: `Supabase error (${resp.status}): ${errText.slice(0, 150)}`,
           };
         }
 
+        for (const r of chunk) {
+          if (r.id) syncedIds.push(r.id);
+        }
         synced += chunk.length;
         if (onProgress) {
           onProgress(synced, total);
@@ -571,11 +617,12 @@ class SupabaseService {
       }
 
       this.saveConfig({ ...cfg, lastSyncedAt: new Date().toISOString() });
-      return { ok: true, synced };
+      return { ok: true, synced, syncedIds };
     } catch (err: any) {
       return {
         ok: false,
         synced,
+        syncedIds,
         error: err?.message || 'Gagal mengunggah batch ke Supabase',
       };
     }
@@ -621,6 +668,37 @@ class SupabaseService {
       return resp.ok;
     } catch {
       return false;
+    }
+  }
+
+  // Delete specific product IDs (used for compensating transaction rollback on partial multi-batch failure)
+  async deleteProductsByIds(ids: string[]): Promise<{ ok: boolean; error?: string }> {
+    if (!this.isConfigured() || ids.length === 0) return { ok: true };
+    const cfg = this.getConfig();
+    const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+    const chunkSize = 80;
+
+    try {
+      for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+        const slice = uniqueIds.slice(i, i + chunkSize);
+        const inClause = slice.map((id) => `"${id.replace(/"/g, '\\"')}"`).join(',');
+        const resp = await this.requestWithKeyFallback(
+          `${cfg.url}/rest/v1/products?id=in.${encodeURIComponent(`(${inClause})`)}`,
+          cfg.anonKey,
+          { method: 'DELETE' },
+          {
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          }
+        );
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return { ok: false, error: `Rollback delete error (${resp.status}): ${errText.slice(0, 120)}` };
+        }
+      }
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Cloud rollback delete failed' };
     }
   }
 

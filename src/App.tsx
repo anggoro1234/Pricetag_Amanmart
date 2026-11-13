@@ -623,8 +623,15 @@ export default function App() {
           stores={stores}
           activeStoreId={activeStore.id}
           existingProducts={products}
-          onImportComplete={(imported, targetStoreId, updateExisting, replaceAllLocal) => {
-            storageService.importProducts(imported, targetStoreId, updateExisting, replaceAllLocal);
+          onImportComplete={(imported, targetStoreId, updateExisting, replaceAllLocal, onProgress) => {
+            return storageService.importProductsTransactional(
+              imported,
+              targetStoreId,
+              updateExisting,
+              replaceAllLocal,
+              true,
+              onProgress
+            );
           }}
         />
       )}

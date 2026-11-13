@@ -39,15 +39,24 @@ export interface ImportProductRecord {
   name: string;
   barcode: string;
   price: number;
+  priceProvided?: boolean;
   sku?: string;
   category?: string;
+  department?: string;
   brand?: string;
+  supplier?: string;
   unitLabel?: string;
   bulkPrice?: number;
   bulkQuantity?: number;
   bulkLabel?: string;
   stock?: number;
   minThreshold?: number;
+  dateEffective?: string;
+  blocked?: boolean;
+  unitCost?: number;
+  priceTier0?: number;
+  priceTier1?: number;
+  priceTier2?: number;
 }
 
 export interface Product {
@@ -166,4 +175,18 @@ export interface SyncQueueItem {
   payload: any;
   timestamp: number;
   status: 'QUEUED' | 'SYNCING' | 'SYNCED' | 'FAILED';
+}
+
+export interface ImportTransactionResult {
+  ok: boolean;
+  added: number;
+  updated: number;
+  skipped: number;
+  duplicatesMerged: number;
+  cloudSynced: number;
+  cloudAttempted: boolean;
+  rolledBack: boolean;
+  cloudRolledBack?: boolean;
+  error?: string;
+  products: Product[];
 }

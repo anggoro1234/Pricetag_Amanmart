@@ -9,7 +9,8 @@ import {
   LowStockAlert, 
   SyncQueueItem,
   ThermalPrinterSettings,
-  ImportProductRecord
+  ImportProductRecord,
+  ImportTransactionResult
 } from '../types';
 import { INITIAL_PRODUCTS, INITIAL_STORES, INITIAL_TEMPLATES, INITIAL_USERS } from '../data/initialData';
 import { audioService } from './audioService';
@@ -197,7 +198,16 @@ class StorageService {
     this.memoryProducts = products;
     // Save full dataset to IndexedDB (handles 10,000 - 100,000+ items without QuotaExceededError)
     idbSaveProducts(products).catch(() => {});
+    this.writeLocalProductsFallback(products);
+  }
 
+  private async persistProductsAsync(products: Product[]): Promise<void> {
+    this.memoryProducts = products;
+    this.writeLocalProductsFallback(products);
+    await idbSaveProducts(products);
+  }
+
+  private writeLocalProductsFallback(products: Product[]) {
     // Only write to localStorage if dataset is small enough (< 2000 items), and always wrap in try/catch
     if (typeof window !== 'undefined') {
       try {
@@ -520,7 +530,7 @@ class StorageService {
   isOnline(): boolean {
     if (this.isSimulatedOffline()) return false;
     if (typeof navigator === 'undefined') return true;
-    return navigator.onLine;
+    return navigator.onLine !== false;
   }
 
   private handleNetworkRestored() {
@@ -978,38 +988,67 @@ class StorageService {
     this.broadcastChange();
   }
 
-  // --- Bulk Product Import (Supports 10,000 - 100,000+ Items with O(1) Lookup & IndexedDB + Supabase) ---
-  importProducts(
-    records: ImportProductRecord[],
-    targetStoreId: string = 'store-krg',
-    updateExisting: boolean = true,
-    replaceAllLocal: boolean = false,
-    syncToCloud: boolean = true
-  ): { added: number; updated: number; products: Product[]; touchedProducts: Product[] } {
-    if (replaceAllLocal && typeof window !== 'undefined') {
-      try {
-        localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
-      } catch {}
+  private cloneProductForSnapshot(p: Product): Product {
+    const clonedStocks: Record<string, ProductStock> = {};
+    if (p.stocks) {
+      for (const [storeId, st] of Object.entries(p.stocks)) {
+        clonedStocks[storeId] = { ...st };
+      }
     }
+    return {
+      ...p,
+      pricing: { ...p.pricing },
+      stocks: clonedStocks,
+      promotionalDiscount: p.promotionalDiscount ? { ...p.promotionalDiscount } : undefined,
+    };
+  }
 
-    const existingProducts = replaceAllLocal ? [] : [...this.getProducts()];
+  private prepareImportMutation(
+    records: ImportProductRecord[],
+    targetStoreId: string,
+    updateExisting: boolean,
+    replaceAllLocal: boolean,
+    sourceProducts: Product[]
+  ): {
+    added: number;
+    updated: number;
+    skipped: number;
+    duplicatesMerged: number;
+    finalProducts: Product[];
+    touchedProducts: Product[];
+  } {
+    const existingProducts = replaceAllLocal
+      ? []
+      : sourceProducts.map((p) => this.cloneProductForSnapshot(p));
     const stores = this.getStores();
     let added = 0;
     let updated = 0;
+    let skipped = 0;
+    let duplicatesMerged = 0;
 
     // Build O(1) hash maps so importing 10,000+ rows executes in < 100ms without freezing browser
     const skuMap = new Map<string, Product>();
+    const skuNormalizedMap = new Map<string, Product>();
     const barcodeMap = new Map<string, Product>();
     const nameMap = new Map<string, Product>();
 
+    const normalizeLooseSku = (val: string): string => {
+      const cleaned = val.trim().toLowerCase();
+      return /^[0-9]+$/.test(cleaned) ? cleaned.replace(/^0+(?=[0-9])/, '') : cleaned;
+    };
+
     existingProducts.forEach((p) => {
-      if (p.sku) skuMap.set(p.sku.toLowerCase(), p);
-      if (p.barcode) barcodeMap.set(p.barcode.toLowerCase(), p);
-      if (p.name) nameMap.set(p.name.toLowerCase(), p);
+      if (p.sku) {
+        skuMap.set(p.sku.trim().toLowerCase(), p);
+        skuNormalizedMap.set(normalizeLooseSku(p.sku), p);
+      }
+      if (p.barcode) barcodeMap.set(p.barcode.trim().toLowerCase(), p);
+      if (p.name) nameMap.set(p.name.replace(/\s+/g, ' ').trim().toLowerCase(), p);
     });
 
     const newProductsToPrepend: Product[] = [];
-    const touchedProducts: Product[] = [];
+    const touchedById = new Map<string, Product>();
+    const batchSeenKeys = new Set<string>();
     const nowIso = new Date().toISOString();
     const todayFormatted = new Date().toLocaleDateString('en-GB');
     const batchTimestamp = Date.now();
@@ -1020,10 +1059,16 @@ class StorageService {
       if (!cleanName && rawSku) {
         cleanName = `ITEM SKU ${rawSku}`;
       }
-      if (!cleanName) return;
+      if (!cleanName) {
+        skipped++;
+        return;
+      }
 
       let rawBarcode = rec.barcode ? rec.barcode.trim() : '';
-      let unitPrice = typeof rec.price === 'number' && !isNaN(rec.price) ? Math.max(0, Math.round(rec.price)) : 0;
+      let unitPrice =
+        typeof rec.price === 'number' && !isNaN(rec.price) && isFinite(rec.price)
+          ? Math.max(0, Math.round(rec.price))
+          : 0;
       let rawCategory = rec.category ? rec.category.trim() : '';
       let rawStock = rec.stock;
 
@@ -1044,24 +1089,45 @@ class StorageService {
       }
 
       cleanName = cleanName.replace(/;+$/g, '').replace(/\s+/g, ' ').trim();
-      if (!cleanName) return;
+      if (!cleanName) {
+        skipped++;
+        return;
+      }
 
       const normalizedCat = normalizeCategoryName(rawCategory);
-      const safeStock = rawStock !== undefined && !isNaN(rawStock) ? Math.max(0, Math.round(rawStock)) : undefined;
+      const safeStock =
+        rawStock !== undefined && !isNaN(rawStock) && isFinite(rawStock)
+          ? Math.max(0, Math.round(rawStock))
+          : undefined;
       const preliminaryBarcode = rawBarcode ? sanitizeBarcodeValue(rawBarcode, rawSku || cleanName) : '';
 
-      // O(1) lookup by SKU, Barcode, or Name
+      const batchKey = rawSku
+        ? `sku:${rawSku.toLowerCase()}`
+        : preliminaryBarcode
+          ? `bc:${preliminaryBarcode.toLowerCase()}`
+          : `name:${cleanName.toLowerCase()}`;
+
+      const isIntraFileDuplicate = batchSeenKeys.has(batchKey);
+      if (isIntraFileDuplicate) {
+        duplicatesMerged++;
+      }
+      batchSeenKeys.add(batchKey);
+
+      // O(1) lookup by SKU (exact or numeric leading-zero-normalized), Barcode, or normalized Name
       const matchedProd =
-        (rawSku ? skuMap.get(rawSku.toLowerCase()) : undefined) ||
+        (rawSku
+          ? skuMap.get(rawSku.trim().toLowerCase()) || skuNormalizedMap.get(normalizeLooseSku(rawSku))
+          : undefined) ||
         (preliminaryBarcode ? barcodeMap.get(preliminaryBarcode.toLowerCase()) : undefined) ||
-        nameMap.get(cleanName.toLowerCase());
+        nameMap.get(cleanName.replace(/\s+/g, ' ').trim().toLowerCase());
 
       if (matchedProd) {
-        if (updateExisting) {
+        if (updateExisting || isIntraFileDuplicate) {
           matchedProd.name = cleanName.toUpperCase();
           if (rawSku) {
             matchedProd.sku = rawSku;
-            skuMap.set(rawSku.toLowerCase(), matchedProd);
+            skuMap.set(rawSku.trim().toLowerCase(), matchedProd);
+            skuNormalizedMap.set(normalizeLooseSku(rawSku), matchedProd);
           }
           if (rawBarcode && rawBarcode.length >= 5 && !rawBarcode.toUpperCase().includes('E+')) {
             matchedProd.barcode = sanitizeBarcodeValue(rawBarcode, matchedProd.sku || cleanName);
@@ -1070,20 +1136,29 @@ class StorageService {
             matchedProd.barcode = sanitizeBarcodeValue(matchedProd.barcode, matchedProd.sku || cleanName);
             barcodeMap.set(matchedProd.barcode.toLowerCase(), matchedProd);
           }
-          if (unitPrice >= 0) {
+          // Overwrite old/un-updated prices; only preserve existing non-zero price if the new cell was completely blank
+          if (unitPrice > 0 || rec.priceProvided !== false || matchedProd.pricing.unitPrice === 0) {
             matchedProd.pricing.unitPrice = unitPrice;
             if (!rec.bulkPrice && unitPrice > 0) {
               matchedProd.pricing.bulkPrice = Math.round(unitPrice * 22);
             }
           }
-          if (rec.bulkPrice !== undefined && rec.bulkPrice > 0) matchedProd.pricing.bulkPrice = rec.bulkPrice;
-          if (rec.bulkQuantity !== undefined && rec.bulkQuantity > 0) matchedProd.pricing.bulkQuantity = rec.bulkQuantity;
+          if (rec.bulkPrice !== undefined && rec.bulkPrice > 0) {
+            matchedProd.pricing.bulkPrice = Math.round(rec.bulkPrice);
+          }
+          if (rec.bulkQuantity !== undefined && rec.bulkQuantity > 0) {
+            matchedProd.pricing.bulkQuantity = Math.round(rec.bulkQuantity);
+          }
           if (rec.bulkLabel) matchedProd.pricing.bulkLabel = rec.bulkLabel.toUpperCase();
           if (rawCategory) {
             matchedProd.category = normalizedCat;
-            matchedProd.department = `${normalizedCat} / General`;
+            matchedProd.department = rec.department || `${normalizedCat} / General`;
+          } else if (rec.department) {
+            matchedProd.department = rec.department;
           }
           if (rec.brand) matchedProd.brand = rec.brand;
+          if (rec.supplier) matchedProd.supplier = rec.supplier;
+          if (rec.dateEffective) matchedProd.dateEffective = rec.dateEffective;
           if (rec.unitLabel) matchedProd.pricing.unitLabel = rec.unitLabel.toUpperCase();
 
           if (safeStock !== undefined) {
@@ -1100,8 +1175,13 @@ class StorageService {
               matchedProd.stocks[targetStoreId].lastUpdated = nowIso;
             }
           }
-          touchedProducts.push(matchedProd);
-          updated++;
+          const alreadyUpdatedInBatch = touchedById.has(matchedProd.id);
+          touchedById.set(matchedProd.id, matchedProd);
+          if (!alreadyUpdatedInBatch) {
+            updated++;
+          }
+        } else {
+          skipped++;
         }
       } else {
         const newSku = rawSku || `100${Math.floor(10000 + Math.random() * 90000)}`;
@@ -1131,8 +1211,8 @@ class StorageService {
           barcodeType: 'EAN13',
           name: cleanName.toUpperCase(),
           category: normalizedCat,
-          brand: rec.brand || 'General',
-          department: `${normalizedCat} / General`,
+          brand: rec.brand || rec.supplier || 'General',
+          department: rec.department || `${normalizedCat} / General`,
           currency: 'Rp.',
           pricing: {
             unitLabel: (rec.unitLabel || 'PCS').toUpperCase(),
@@ -1140,34 +1220,252 @@ class StorageService {
             unitPrice,
             bulkLabel: (rec.bulkLabel || 'CRT').toUpperCase(),
             bulkQuantity: rec.bulkQuantity || 24,
-            bulkPrice: rec.bulkPrice || (unitPrice > 0 ? Math.round(unitPrice * 22) : 0),
+            bulkPrice:
+              rec.bulkPrice && rec.bulkPrice > 0
+                ? Math.round(rec.bulkPrice)
+                : unitPrice > 0
+                  ? Math.round(unitPrice * 22)
+                  : 0,
           },
           stocks: initialStocks,
-          dateEffective: todayFormatted,
+          dateEffective: rec.dateEffective || todayFormatted,
+          supplier: rec.supplier,
           locationBin: 'A-01-01',
         };
 
         newProductsToPrepend.push(newProd);
-        touchedProducts.push(newProd);
+        touchedById.set(newProd.id, newProd);
         skuMap.set(newSku.toLowerCase(), newProd);
+        skuNormalizedMap.set(normalizeLooseSku(newSku), newProd);
         barcodeMap.set(cleanBarcode.toLowerCase(), newProd);
-        nameMap.set(newProd.name.toLowerCase(), newProd);
+        nameMap.set(newProd.name.replace(/\s+/g, ' ').trim().toLowerCase(), newProd);
         added++;
       }
     });
 
     const finalProducts = [...newProductsToPrepend, ...existingProducts];
-    this.persistProducts(finalProducts);
+    return {
+      added,
+      updated,
+      skipped,
+      duplicatesMerged,
+      finalProducts,
+      touchedProducts: Array.from(touchedById.values()),
+    };
+  }
+
+  // --- Bulk Product Import (Supports 10,000 - 100,000+ Items with O(1) Lookup & IndexedDB + Supabase) ---
+  importProducts(
+    records: ImportProductRecord[],
+    targetStoreId: string = 'store-krg',
+    updateExisting: boolean = true,
+    replaceAllLocal: boolean = false,
+    syncToCloud: boolean = true
+  ): { added: number; updated: number; products: Product[]; touchedProducts: Product[] } {
+    if (replaceAllLocal && typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
+      } catch {}
+    }
+
+    const prepared = this.prepareImportMutation(
+      records,
+      targetStoreId,
+      updateExisting,
+      replaceAllLocal,
+      this.getProducts()
+    );
+
+    this.persistProducts(prepared.finalProducts);
 
     // Sync imported/updated items to Supabase in background if configured and enabled
-    if (syncToCloud && this.isOnline() && supabaseService.isConfigured() && touchedProducts.length > 0) {
-      supabaseService.upsertProductsBatch(touchedProducts).catch(() => {});
+    if (syncToCloud && this.isOnline() && supabaseService.isConfigured() && prepared.touchedProducts.length > 0) {
+      supabaseService.upsertProductsBatch(prepared.touchedProducts).catch(() => {});
     }
 
     this.evaluateStockAlerts();
     this.broadcastChange();
 
-    return { added, updated, products: finalProducts, touchedProducts };
+    return {
+      added: prepared.added,
+      updated: prepared.updated,
+      products: prepared.finalProducts,
+      touchedProducts: prepared.touchedProducts,
+    };
+  }
+
+  // Transactional Bulk Import with pre-commit validation, deep state snapshot, and local + cloud rollback on failure
+  async importProductsTransactional(
+    records: ImportProductRecord[],
+    targetStoreId: string = 'store-krg',
+    updateExisting: boolean = true,
+    replaceAllLocal: boolean = false,
+    syncToCloud: boolean = true,
+    onProgress?: (completed: number, total: number) => void
+  ): Promise<ImportTransactionResult> {
+    if (!Array.isArray(records) || records.length === 0) {
+      return {
+        ok: false,
+        added: 0,
+        updated: 0,
+        skipped: 0,
+        duplicatesMerged: 0,
+        cloudSynced: 0,
+        cloudAttempted: false,
+        rolledBack: false,
+        error: 'Tidak ada baris produk valid untuk diimpor.',
+        products: this.getProducts(),
+      };
+    }
+
+    const hasWindow = typeof window !== 'undefined';
+    const prevProductsSnapshot = this.getProducts().map((p) => this.cloneProductForSnapshot(p));
+    const prevByIdMap = new Map<string, Product>();
+    prevProductsSnapshot.forEach((p) => prevByIdMap.set(p.id, p));
+
+    const prevPurgedFlag = hasWindow ? localStorage.getItem(STORAGE_KEYS.LOCAL_DATA_PURGED) : null;
+    const prevAlertsRaw = hasWindow ? localStorage.getItem(STORAGE_KEYS.ALERTS) : null;
+
+    const restoreLocalSnapshot = async () => {
+      if (hasWindow) {
+        try {
+          if (prevPurgedFlag === null) {
+            localStorage.removeItem(STORAGE_KEYS.LOCAL_DATA_PURGED);
+          } else {
+            localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, prevPurgedFlag);
+          }
+          if (prevAlertsRaw === null) {
+            localStorage.removeItem(STORAGE_KEYS.ALERTS);
+          } else {
+            localStorage.setItem(STORAGE_KEYS.ALERTS, prevAlertsRaw);
+          }
+        } catch {}
+      }
+      await this.persistProductsAsync(prevProductsSnapshot);
+      this.broadcastChange();
+    };
+
+    try {
+      const prepared = this.prepareImportMutation(
+        records,
+        targetStoreId,
+        updateExisting,
+        replaceAllLocal,
+        prevProductsSnapshot
+      );
+
+      if (prepared.added === 0 && prepared.updated === 0 && prepared.skipped === 0) {
+        return {
+          ok: false,
+          added: 0,
+          updated: 0,
+          skipped: prepared.skipped,
+          duplicatesMerged: prepared.duplicatesMerged,
+          cloudSynced: 0,
+          cloudAttempted: false,
+          rolledBack: false,
+          error: 'Semua baris gagal validasi field wajib (Item Name / SKU). Import dibatalkan.',
+          products: prevProductsSnapshot,
+        };
+      }
+
+      if (replaceAllLocal && hasWindow) {
+        try {
+          localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
+        } catch {}
+      }
+
+      await this.persistProductsAsync(prepared.finalProducts);
+
+      let cloudSynced = 0;
+      let cloudAttempted = false;
+
+      if (
+        syncToCloud &&
+        this.isOnline() &&
+        supabaseService.isConfigured() &&
+        prepared.touchedProducts.length > 0
+      ) {
+        cloudAttempted = true;
+        const cloudRes = await supabaseService.upsertProductsBatch(prepared.touchedProducts, onProgress);
+
+        if (!cloudRes.ok) {
+          // 1. Roll back local storage & memory state immediately
+          await restoreLocalSnapshot();
+
+          // 2. Compensating rollback on Supabase for any partial chunks committed before failure
+          let cloudRolledBack = true;
+          const syncedIds = cloudRes.syncedIds || [];
+          if (syncedIds.length > 0) {
+            const toRestore: Product[] = [];
+            const toDelete: string[] = [];
+            syncedIds.forEach((id) => {
+              const prev = prevByIdMap.get(id);
+              if (prev) toRestore.push(prev);
+              else toDelete.push(id);
+            });
+
+            if (toRestore.length > 0) {
+              const restoreRes = await supabaseService.upsertProductsBatch(toRestore);
+              if (!restoreRes.ok) cloudRolledBack = false;
+            }
+            if (toDelete.length > 0) {
+              const delRes = await supabaseService.deleteProductsByIds(toDelete);
+              if (!delRes.ok) cloudRolledBack = false;
+            }
+          }
+
+          return {
+            ok: false,
+            added: 0,
+            updated: 0,
+            skipped: prepared.skipped,
+            duplicatesMerged: prepared.duplicatesMerged,
+            cloudSynced: 0,
+            cloudAttempted: true,
+            rolledBack: true,
+            cloudRolledBack,
+            error:
+              cloudRes.error ||
+              'Sinkronisasi Supabase gagal saat transaksi import. Perubahan dibatalkan & dikembalikan ke kondisi sebelumnya.',
+            products: prevProductsSnapshot,
+          };
+        }
+
+        cloudSynced = cloudRes.synced;
+      }
+
+      this.evaluateStockAlerts();
+      this.broadcastChange();
+
+      return {
+        ok: true,
+        added: prepared.added,
+        updated: prepared.updated,
+        skipped: prepared.skipped,
+        duplicatesMerged: prepared.duplicatesMerged,
+        cloudSynced,
+        cloudAttempted,
+        rolledBack: false,
+        products: prepared.finalProducts,
+      };
+    } catch (err: any) {
+      await restoreLocalSnapshot();
+      return {
+        ok: false,
+        added: 0,
+        updated: 0,
+        skipped: 0,
+        duplicatesMerged: 0,
+        cloudSynced: 0,
+        cloudAttempted: false,
+        rolledBack: true,
+        error:
+          err?.message ||
+          'Terjadi error saat memproses import. Sistem telah melakukan rollback otomatis ke katalog sebelumnya.',
+        products: prevProductsSnapshot,
+      };
+    }
   }
 
   // Shared helper to load bundled 10,112-item master CSV (/ITEMLISTMASTER_cleaned.csv) into IndexedDB
