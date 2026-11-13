@@ -507,7 +507,7 @@ export default function App() {
         isOpen={scannerOpen}
         onClose={() => setScannerOpen(false)}
         onSelectProduct={(p) => {
-          handleQuickPrint(p);
+          handleAddToBatch(p, 1);
         }}
         onAddToBatchQueue={(p, qty) => {
           handleAddToBatch(p, qty);
@@ -515,6 +515,13 @@ export default function App() {
         onQuickPrint={(p) => {
           handleQuickPrint(p);
         }}
+        onOpenBatchPrint={() => {
+          setScannerOpen(false);
+          setBatchPrintOpen(true);
+        }}
+        onUpdateBatchQuantity={handleUpdateBatchQuantity}
+        onRemoveBatchItem={handleRemoveBatchItem}
+        batchQueue={batchQueue}
         templates={templates}
         activeStore={activeStore}
       />

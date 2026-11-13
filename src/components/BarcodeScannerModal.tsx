@@ -15,8 +15,13 @@ import {
   RotateCcw,
   Database,
   RefreshCw,
+  Plus,
+  Minus,
+  Trash2,
+  ArrowRight,
+  Check,
 } from 'lucide-react';
-import { Product, LabelTemplateConfig, StoreLocation } from '../types';
+import { Product, LabelTemplateConfig, StoreLocation, PrintQueueItem } from '../types';
 import { storageService } from '../services/storageService';
 import { audioService } from '../services/audioService';
 import { LabelPreview } from './LabelPreview';
@@ -28,12 +33,24 @@ const isBpomQrCode = (code: string): boolean =>
   /\(90\)\s*(?:na|nb|nc|nd|ne|md|ml|tr|qd|si|ti|sd|sl|ht|ff|dkl|gkl)/i.test(code) ||
   /^\s*(?:na|nb|nc|nd|ne|md|ml|tr)\d{7,}/i.test(code);
 
+interface ScanSessionItem {
+  id: string;
+  product: Product;
+  quantity: number;
+  time: string;
+  barcode: string;
+}
+
 interface BarcodeScannerModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSelectProduct?: (product: Product) => void;
   onAddToBatchQueue?: (product: Product, quantity: number) => void;
   onQuickPrint?: (product: Product) => void;
+  onOpenBatchPrint?: () => void;
+  onUpdateBatchQuantity?: (id: string, delta: number) => void;
+  onRemoveBatchItem?: (id: string) => void;
+  batchQueue?: PrintQueueItem[];
   templates: LabelTemplateConfig[];
   activeStore: StoreLocation;
 }
@@ -44,6 +61,10 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   onSelectProduct,
   onAddToBatchQueue,
   onQuickPrint,
+  onOpenBatchPrint,
+  onUpdateBatchQuantity,
+  onRemoveBatchItem,
+  batchQueue,
   templates,
   activeStore,
 }) => {
@@ -69,6 +90,13 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [catalogCount, setCatalogCount] = useState<number>(0);
   const [isSyncingCatalog, setIsSyncingCatalog] = useState<boolean>(false);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
+  const [autoQueueToBatch, setAutoQueueToBatch] = useState<boolean>(true);
+  const [scanSessionHistory, setScanSessionHistory] = useState<ScanSessionItem[]>([]);
+
+  const totalBatchItems = batchQueue ? batchQueue.length : scanSessionHistory.length;
+  const totalBatchLabels = batchQueue
+    ? batchQueue.reduce((acc, it) => acc + (it.quantity || 1), 0)
+    : scanSessionHistory.reduce((acc, it) => acc + it.quantity, 0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const pdaInputRef = useRef<HTMLInputElement | null>(null);
@@ -410,9 +438,47 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       setFoundProduct(product);
       setShowSuccessNotification(true);
       setTimeout(() => setShowSuccessNotification(false), 2500);
-      if (onSelectProduct) {
+
+      // Dual Behavior:
+      // 1. Simpan & antrekan produk ke antrean Bulk Batch Print otomatis tanpa pop-up redirect
+      if (autoQueueToBatch) {
+        if (onAddToBatchQueue) {
+          onAddToBatchQueue(product, 1);
+        } else if (onSelectProduct) {
+          onSelectProduct(product);
+        }
+      } else if (onSelectProduct) {
         onSelectProduct(product);
       }
+
+      // 2. Simpan & perbarui riwayat produk yang terscan pada interface terminal PDA
+      const scanTimeStr = new Date().toLocaleTimeString();
+      setScanSessionHistory((prev) => {
+        const existIdx = prev.findIndex((item) => item.product.id === product.id);
+        if (existIdx >= 0) {
+          const updated = [...prev];
+          updated[existIdx] = {
+            ...updated[existIdx],
+            quantity: updated[existIdx].quantity + 1,
+            time: scanTimeStr,
+          };
+          const [moved] = updated.splice(existIdx, 1);
+          return [moved, ...updated];
+        }
+        return [
+          {
+            id: `scan-${Date.now()}-${product.id}`,
+            product,
+            quantity: 1,
+            time: scanTimeStr,
+            barcode: code,
+          },
+          ...prev,
+        ];
+      });
+
+      setLastSignalInfo(`✅ ${product.name} (+1 ke antrean batch) (${timeStr})`);
+
       if (!continuousScan && scanActiveRef.current) {
         stopCamera();
       }
@@ -714,6 +780,43 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 </span>
               </div>
 
+              {/* Batch Queue Status Header Banner */}
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                    <Layers className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-emerald-950">
+                        Antrean Batch: {totalBatchLabels} Label ({totalBatchItems} Produk)
+                      </span>
+                      <span className="text-[10px] bg-emerald-200/80 text-emerald-900 font-semibold px-2 py-0.5 rounded-full">
+                        Auto-Queue Aktif
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-emerald-700 truncate">
+                      Barcode yang discan otomatis diantrekan &amp; tersimpan di terminal PDA ini.
+                    </p>
+                  </div>
+                </div>
+
+                {onOpenBatchPrint && (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenBatchPrint();
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition shadow-xs shrink-0"
+                  >
+                    <span>Buka Cetak Batch ({totalBatchItems})</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
               {/* Dedicated Focusable Capture Input (Uncontrolled DOM ref + inputMode="text" default so Android DT338b ScanWedge IME CommitText works reliably) */}
               <div className="bg-white border-2 border-emerald-500 rounded-xl p-3 shadow-xs space-y-2">
                 <div className="flex items-center justify-between gap-2">
@@ -824,18 +927,32 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 </form>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-slate-600">
-                  <label
-                    className="flex items-center gap-1.5 cursor-pointer"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={autoSubmitNoEnter}
-                      onChange={(e) => setAutoSubmitNoEnter(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded text-emerald-600 focus:ring-emerald-500"
-                    />
-                    <span>Auto-scan tanpa tombol Enter (wajib aktif untuk mayoritas PDA Android)</span>
-                  </label>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label
+                      className="flex items-center gap-1.5 cursor-pointer font-medium text-emerald-800"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={autoQueueToBatch}
+                        onChange={(e) => setAutoQueueToBatch(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded text-emerald-600 focus:ring-emerald-500"
+                      />
+                      <span>Auto-Queue ke Antrean Batch (tanpa popup)</span>
+                    </label>
+                    <label
+                      className="flex items-center gap-1.5 cursor-pointer"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={autoSubmitNoEnter}
+                        onChange={(e) => setAutoSubmitNoEnter(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded text-emerald-600 focus:ring-emerald-500"
+                      />
+                      <span>Auto-scan tanpa tombol Enter</span>
+                    </label>
+                  </div>
                   <span className="font-mono text-[10px] text-slate-500 truncate max-w-full">
                     Sinyal: {lastSignalInfo}
                   </span>
@@ -1031,7 +1148,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold transition"
                   >
                     <Layers className="w-3.5 h-3.5" />
-                    Queue ({printQty})
+                    + Tambah ({printQty}) ke Antrean
                   </button>
 
                   <button
@@ -1069,21 +1186,92 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
             </div>
           ) : null}
 
+          {/* Scan Session History List (Data Tetap Tersimpan di Interface Terminal PDA) */}
+          {scanSessionHistory.length > 0 && (
+            <div className="border border-slate-200 bg-white rounded-xl p-3.5 space-y-2.5 shadow-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-md bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                    <Layers className="w-3.5 h-3.5" />
+                  </div>
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                    Sesi Scan PDA Ini ({scanSessionHistory.length} Produk • {totalBatchLabels} Label)
+                  </h4>
+                </div>
+                {onOpenBatchPrint && (
+                  <button
+                    type="button"
+                    onClick={onOpenBatchPrint}
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 hover:text-emerald-900 underline"
+                  >
+                    <span>Buka Batch Print Queue</span>
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto pr-1">
+                {scanSessionHistory.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center justify-between py-2 text-xs gap-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="font-bold text-slate-900 truncate">{item.product.name}</p>
+                      <p className="text-[11px] font-mono text-slate-500">
+                        {item.barcode} • SKU: {item.product.sku} • Rp{' '}
+                        {item.product.pricing.unitPrice.toLocaleString('id-ID')}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 font-bold rounded text-[11px]">
+                        {item.quantity}x
+                      </span>
+                      <span className="text-[10px] text-slate-400">{item.time}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {catalogSyncBanner}
+
           {catalogSyncBanner}
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
-          <div>
-            Active Store:{' '}
-            <span className="font-semibold text-slate-700">{activeStore.name}</span>
+        <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+          <div className="flex items-center gap-3">
+            <div>
+              Active Store:{' '}
+              <span className="font-semibold text-slate-700">{activeStore.name}</span>
+            </div>
+            {totalBatchItems > 0 && (
+              <span className="inline-flex items-center gap-1 text-emerald-700 font-bold bg-emerald-100 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                <Check className="w-3 h-3 text-emerald-600" />
+                {totalBatchLabels} Label di Antrean
+              </span>
+            )}
           </div>
-          <button
-            onClick={onClose}
-            className="px-4 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold rounded-lg transition"
-          >
-            Done
-          </button>
+          <div className="flex items-center gap-2">
+            {onOpenBatchPrint && totalBatchItems > 0 && (
+              <button
+                type="button"
+                onClick={onOpenBatchPrint}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition shadow-xs"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Buka Batch Print ({totalBatchItems})</span>
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="px-4 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold rounded-lg transition"
+            >
+              Done
+            </button>
+          </div>
         </div>
       </div>
     </div>
