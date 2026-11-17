@@ -105,6 +105,90 @@ export const idbClearProducts = async (): Promise<boolean> => {
 };
 
 // ============================================================================
+// 1B. Shared Server Catalog Endpoint (/api/catalog) for Cross-Device LAN/Node Sync
+// ============================================================================
+export const serverCatalogService = {
+  async fetchServerCatalog(): Promise<{
+    ok: boolean;
+    updatedAt: string | null;
+    products: Product[] | null;
+  }> {
+    if (typeof fetch === 'undefined') {
+      return { ok: false, updatedAt: null, products: null };
+    }
+    try {
+      const resp = await fetch('/api/catalog', {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      if (!resp.ok) {
+        return { ok: false, updatedAt: null, products: null };
+      }
+      const contentType = resp.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        return { ok: false, updatedAt: null, products: null };
+      }
+      const data = await resp.json();
+      if (!data || !data.ok || !Array.isArray(data.products)) {
+        return { ok: false, updatedAt: null, products: null };
+      }
+      return {
+        ok: true,
+        updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : null,
+        products: data.products as Product[],
+      };
+    } catch {
+      return { ok: false, updatedAt: null, products: null };
+    }
+  },
+
+  async pushServerCatalog(options: {
+    mode: 'replace' | 'upsert';
+    products: Product[];
+    deletedIds?: string[];
+    updatedAt?: string;
+  }): Promise<boolean> {
+    if (typeof fetch === 'undefined') return false;
+    try {
+      const resp = await fetch('/api/catalog', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          mode: options.mode,
+          products: options.products,
+          deletedIds: options.deletedIds || [],
+          updatedAt: options.updatedAt || new Date().toISOString(),
+        }),
+      });
+      if (!resp.ok) return false;
+      const contentType = resp.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) return false;
+      const data = await resp.json();
+      return Boolean(data?.ok);
+    } catch {
+      return false;
+    }
+  },
+
+  async clearServerCatalog(): Promise<boolean> {
+    if (typeof fetch === 'undefined') return false;
+    try {
+      const resp = await fetch('/api/catalog', {
+        method: 'DELETE',
+        headers: { Accept: 'application/json' },
+      });
+      return resp.ok;
+    } catch {
+      return false;
+    }
+  },
+};
+
+// ============================================================================
 // 2. Row Mapping between App Product Type & Supabase PostgreSQL Table
 //    Supports both full app rows AND direct CSV uploads (SKU,Item Name,Barcode,Price,Category,Stock)
 // ============================================================================
@@ -143,28 +227,43 @@ const toSafeInt = (val: any, fallback: number = 0): number => {
   return Number.isFinite(n) ? Math.max(0, Math.round(n)) : fallback;
 };
 
-const mapProductToRow = (p: Product): SupabaseProductRow => ({
-  id: p.id || `prod-${p.sku || Date.now()}`,
-  sku: p.sku || '',
-  barcode: p.barcode || '',
-  barcode_type: p.barcodeType || 'EAN13',
-  name: p.name || '',
-  category: p.category || 'Grocery',
-  brand: p.brand || 'General',
-  department: p.department || `${p.category || 'Grocery'} / General`,
-  currency: p.currency || 'Rp.',
-  unit_price: toSafeInt(p.pricing?.unitPrice, 0),
-  unit_label: p.pricing?.unitLabel || 'PCS',
-  unit_quantity: toSafeInt(p.pricing?.unitQuantity, 1) || 1,
-  bulk_price: toSafeInt(p.pricing?.bulkPrice, 0),
-  bulk_label: p.pricing?.bulkLabel || 'CRT',
-  bulk_quantity: toSafeInt(p.pricing?.bulkQuantity, 24) || 24,
-  stocks: p.stocks || {},
-  promotional_discount: p.promotionalDiscount || null,
-  date_effective: p.dateEffective || new Date().toLocaleDateString('en-GB'),
-  location_bin: p.locationBin || 'A-01-01',
-  updated_at: new Date().toISOString(),
-});
+const mapProductToRow = (p: Product, includeCsvFallbackColumns = false): SupabaseProductRow => {
+  const unitPrice = toSafeInt(p.pricing?.unitPrice, 0);
+  const krgStock = toSafeInt(p.stocks?.['store-krg']?.quantity, 0);
+  const baseRow: SupabaseProductRow = {
+    id: p.id || `prod-${p.sku || Date.now()}`,
+    sku: p.sku || '',
+    barcode: p.barcode || '',
+    barcode_type: p.barcodeType || 'EAN13',
+    name: p.name || '',
+    category: p.category || 'Grocery',
+    brand: p.brand || 'General',
+    department: p.department || `${p.category || 'Grocery'} / General`,
+    currency: p.currency || 'Rp.',
+    unit_price: unitPrice,
+    unit_label: p.pricing?.unitLabel || 'PCS',
+    unit_quantity: toSafeInt(p.pricing?.unitQuantity, 1) || 1,
+    bulk_price: toSafeInt(p.pricing?.bulkPrice, 0),
+    bulk_label: p.pricing?.bulkLabel || 'CRT',
+    bulk_quantity: toSafeInt(p.pricing?.bulkQuantity, 24) || 24,
+    stocks: p.stocks || {},
+    promotional_discount: p.promotionalDiscount || null,
+    date_effective: p.dateEffective || new Date().toLocaleDateString('en-GB'),
+    location_bin: p.locationBin || 'A-01-01',
+    updated_at: new Date().toISOString(),
+  };
+
+  if (includeCsvFallbackColumns) {
+    baseRow.SKU = p.sku || '';
+    baseRow['Item Name'] = p.name || '';
+    baseRow.Barcode = p.barcode || '';
+    baseRow.Price = unitPrice;
+    baseRow.Category = p.category || 'Grocery';
+    baseRow.Stock = krgStock;
+  }
+
+  return baseRow;
+};
 
 const mapRowToProduct = (r: SupabaseProductRow, index: number): Product => {
   const sku = String(r.sku || r.SKU || `${1000000 + index}`).trim();
@@ -230,10 +329,28 @@ const mapRowToProduct = (r: SupabaseProductRow, index: number): Product => {
   };
 };
 
+function extractMissingColumnFromError(errText: string): string | null {
+  if (!errText) return null;
+  const pgrstMatch = errText.match(/Could not find the '([^']+)' column/i);
+  if (pgrstMatch && pgrstMatch[1]) return pgrstMatch[1];
+
+  const pgRelMatch = errText.match(/column "([^"]+)" of relation/i);
+  if (pgRelMatch && pgRelMatch[1]) return pgRelMatch[1];
+
+  const pgColMatch = errText.match(/column "([^"]+)" does not exist/i);
+  if (pgColMatch && pgColMatch[1]) return pgColMatch[1];
+
+  return null;
+}
+
 // ============================================================================
 // 3. Supabase Cloud Integration Service (Chunked Batch Upsert + Paginated Fetch)
 // ============================================================================
 class SupabaseService {
+  private unsupportedColumns = new Set<string>();
+  private useCsvFallbackColumns = false;
+  private resolvedConflictTarget: string = 'id';
+
   getConfig(): SupabaseConfig {
     const envUrl = ((import.meta as any).env?.VITE_SUPABASE_URL || '').trim();
     const envKey = ((import.meta as any).env?.VITE_SUPABASE_ANON_KEY || '').trim();
@@ -282,15 +399,6 @@ class SupabaseService {
   isConfigured(): boolean {
     const cfg = this.getConfig();
     return Boolean(cfg.enabled && cfg.url && cfg.anonKey && cfg.url.startsWith('http'));
-  }
-
-  private getHeaders(cfg: SupabaseConfig, extra?: Record<string, string>): Record<string, string> {
-    return {
-      apikey: cfg.anonKey,
-      Authorization: `Bearer ${cfg.anonKey}`,
-      'Content-Type': 'application/json',
-      ...extra,
-    };
   }
 
   // Helper fetch that supports both standard JWT anon keys (eyJ...) and new Supabase publishable keys (sb_publishable_...)
@@ -354,7 +462,7 @@ class SupabaseService {
 
     try {
       const resp = await this.requestWithKeyFallback(
-        `${url}/rest/v1/products?select=id&limit=1`,
+        `${url}/rest/v1/products?select=*&limit=1`,
         anonKey,
         { method: 'GET' },
         { Prefer: 'count=exact' }
@@ -418,16 +526,28 @@ class SupabaseService {
 
     const pageSize = 1000;
     let offset = 0;
+    let useOrderById = true;
     const allRows: SupabaseProductRow[] = [];
 
     try {
       while (true) {
-        const resp = await this.requestWithKeyFallback(
-          `${cfg.url}/rest/v1/products?select=*&order=id.asc&limit=${pageSize}&offset=${offset}`,
+        const orderClause = useOrderById ? '&order=id.asc' : '';
+        let resp = await this.requestWithKeyFallback(
+          `${cfg.url}/rest/v1/products?select=*${orderClause}&limit=${pageSize}&offset=${offset}`,
           cfg.anonKey,
           { method: 'GET' },
           { 'Content-Type': 'application/json' }
         );
+
+        if (!resp.ok && useOrderById && resp.status === 400) {
+          useOrderById = false;
+          resp = await this.requestWithKeyFallback(
+            `${cfg.url}/rest/v1/products?select=*&limit=${pageSize}&offset=${offset}`,
+            cfg.anonKey,
+            { method: 'GET' },
+            { 'Content-Type': 'application/json' }
+          );
+        }
 
         if (!resp.ok) {
           const errText = await resp.text().catch(() => '');
@@ -449,7 +569,7 @@ class SupabaseService {
           break;
         }
 
-        offset += pageSize;
+        offset += pageData.length;
         if (offset >= 100000) break;
       }
 
@@ -469,7 +589,125 @@ class SupabaseService {
     return res.products;
   }
 
-  // Upsert 10,000+ products in safe batches of 400 rows per HTTP request (deduplicated by id to prevent ON CONFLICT errors)
+  private buildSanitizedRow(prod: Product): Record<string, any> {
+    const raw = mapProductToRow(prod, this.useCsvFallbackColumns) as Record<string, any>;
+    const sanitized: Record<string, any> = {};
+    for (const key of Object.keys(raw)) {
+      if (!this.unsupportedColumns.has(key)) {
+        sanitized[key] = raw[key];
+      }
+    }
+    return sanitized;
+  }
+
+  private async uploadSingleChunkWithAdaptation(
+    cfg: SupabaseConfig,
+    chunkProducts: Product[]
+  ): Promise<{ ok: boolean; syncedIds: string[]; error?: string }> {
+    const conflictCandidates = [this.resolvedConflictTarget, 'id', 'sku', 'SKU', ''].filter(
+      (v, idx, arr) => arr.indexOf(v) === idx
+    );
+    let candidateIdx = 0;
+    let lastErrText = '';
+    let lastStatus = 0;
+
+    for (let attempt = 0; attempt < 18; attempt++) {
+      const currentConflict = conflictCandidates[candidateIdx] ?? '';
+      const payloadRows = chunkProducts.map((p) => this.buildSanitizedRow(p));
+
+      const querySuffix = currentConflict ? `?on_conflict=${encodeURIComponent(currentConflict)}` : '';
+      const endpoint = `${cfg.url}/rest/v1/products${querySuffix}`;
+
+      let resp: Response | null = null;
+      try {
+        resp = await this.requestWithKeyFallback(
+          endpoint,
+          cfg.anonKey,
+          {
+            method: 'POST',
+            body: JSON.stringify(payloadRows),
+          },
+          {
+            'Content-Type': 'application/json',
+            Prefer: 'resolution=merge-duplicates,return=minimal',
+          }
+        );
+      } catch (netErr: any) {
+        lastErrText = netErr?.message || 'Network error during batch upload';
+        await new Promise((r) => setTimeout(r, 300 * Math.min(attempt + 1, 4)));
+        continue;
+      }
+
+      if (resp.ok) {
+        this.resolvedConflictTarget = currentConflict;
+        const syncedIds = chunkProducts
+          .map((p) => p.id || `prod-${p.sku}`)
+          .filter(Boolean);
+        return { ok: true, syncedIds };
+      }
+
+      lastStatus = resp.status;
+      lastErrText = await resp.text().catch(() => '');
+
+      // Retry transient rate limits or 5xx errors
+      if (resp.status === 429 || resp.status >= 500) {
+        await new Promise((r) => setTimeout(r, 350 * Math.min(attempt + 1, 4)));
+        continue;
+      }
+
+      // Check if table itself is missing
+      if (
+        resp.status === 404 ||
+        lastErrText.includes('PGRST205') ||
+        (lastErrText.includes('relation') && lastErrText.includes('does not exist'))
+      ) {
+        return {
+          ok: false,
+          syncedIds: [],
+          error:
+            'Tabel "public.products" belum dibuat di Supabase. Silakan jalankan SQL Schema di menu SQL Editor Supabase Anda terlebih dahulu.',
+        };
+      }
+
+      // Check if a specific column is missing in the remote table schema
+      const missingCol = extractMissingColumnFromError(lastErrText);
+      if (missingCol && !this.unsupportedColumns.has(missingCol)) {
+        this.unsupportedColumns.add(missingCol);
+        if (['sku', 'name', 'barcode', 'unit_price', 'category', 'stocks'].includes(missingCol)) {
+          this.useCsvFallbackColumns = true;
+        }
+        if (missingCol === currentConflict && candidateIdx + 1 < conflictCandidates.length) {
+          candidateIdx++;
+        }
+        continue;
+      }
+
+      // Check if ON CONFLICT target constraint does not match remote table
+      if (
+        resp.status === 400 &&
+        (lastErrText.includes('42P10') ||
+          lastErrText.includes('ON CONFLICT') ||
+          lastErrText.includes('constraint') ||
+          lastErrText.includes('PGRST100')) &&
+        candidateIdx + 1 < conflictCandidates.length
+      ) {
+        candidateIdx++;
+        continue;
+      }
+
+      break;
+    }
+
+    return {
+      ok: false,
+      syncedIds: [],
+      error: lastStatus
+        ? `Supabase error (${lastStatus}): ${lastErrText.slice(0, 160)}`
+        : lastErrText || 'Koneksi terputus saat mengirim batch ke Supabase',
+    };
+  }
+
+  // Upsert 10,000+ products in fast schema-adaptive batches (deduplicated by id & sku to prevent ON CONFLICT errors)
   async upsertProductsBatch(
     products: Product[],
     onProgress?: (completed: number, total: number) => void
@@ -477,95 +715,75 @@ class SupabaseService {
     if (!this.isConfigured()) {
       return { ok: false, synced: 0, syncedIds: [], error: 'Supabase belum dikonfigurasi' };
     }
-
-    // Deduplicate by resolved row id (last wins) so Postgres never hits 21000 ON CONFLICT duplicate row error
-    const dedupMap = new Map<string, SupabaseProductRow>();
-    for (const prod of products) {
-      const row = mapProductToRow(prod);
-      if (row.id) {
-        dedupMap.set(row.id, row);
-      }
+    if (!products || products.length === 0) {
+      return { ok: true, synced: 0, syncedIds: [] };
     }
-    const uniqueRows = Array.from(dedupMap.values());
 
+    // Deduplicate by resolved row id and SKU (last wins) so Postgres never hits 21000 ON CONFLICT duplicate row error
+    const dedupById = new Map<string, Product>();
+    const skuOwnerId = new Map<string, string>();
+    for (const prod of products) {
+      const id = prod.id || `prod-${prod.sku || Date.now()}`;
+      const skuKey = String(prod.sku || '').trim().toLowerCase();
+      if (skuKey && skuOwnerId.has(skuKey)) {
+        const existingId = skuOwnerId.get(skuKey)!;
+        dedupById.delete(existingId);
+      }
+      dedupById.set(id, { ...prod, id });
+      if (skuKey) skuOwnerId.set(skuKey, id);
+    }
+
+    const uniqueProducts = Array.from(dedupById.values());
     const cfg = this.getConfig();
-    const batchSize = 400;
-    const total = uniqueRows.length;
+    const batchSize = 250;
+    const total = uniqueProducts.length;
     let synced = 0;
     const syncedIds: string[] = [];
 
+    const chunks: Product[][] = [];
+    for (let i = 0; i < total; i += batchSize) {
+      chunks.push(uniqueProducts.slice(i, i + batchSize));
+    }
+
     try {
-      for (let i = 0; i < total; i += batchSize) {
-        const chunk = uniqueRows.slice(i, i + batchSize);
-
-        let resp: Response | null = null;
-        let lastErrText = '';
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            resp = await this.requestWithKeyFallback(
-              `${cfg.url}/rest/v1/products?on_conflict=id`,
-              cfg.anonKey,
-              {
-                method: 'POST',
-                body: JSON.stringify(chunk),
-              },
-              {
-                'Content-Type': 'application/json',
-                Prefer: 'resolution=merge-duplicates,return=minimal',
-              }
-            );
-            if (resp.ok || (resp.status !== 429 && resp.status < 500)) {
-              break;
-            }
-            lastErrText = await resp.text();
-          } catch (netErr: any) {
-            lastErrText = netErr?.message || 'Network error during batch upload';
-            resp = null;
-          }
-          if (attempt < 2) {
-            await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
-          }
-        }
-
-        if (!resp) {
+      // Upload first chunk first to lock in any schema adaptation or conflict target
+      if (chunks.length > 0) {
+        const firstRes = await this.uploadSingleChunkWithAdaptation(cfg, chunks[0]);
+        if (!firstRes.ok) {
           return {
             ok: false,
             synced,
             syncedIds,
-            error: lastErrText || 'Koneksi terputus saat mengirim batch ke Supabase',
+            error: firstRes.error,
           };
         }
+        synced += chunks[0].length;
+        syncedIds.push(...firstRes.syncedIds);
+        if (onProgress) onProgress(synced, total);
+      }
 
-        if (!resp.ok) {
-          const errText = lastErrText || (await resp.text());
-          if (
-            resp.status === 404 ||
-            errText.includes('relation') ||
-            errText.includes('does not exist') ||
-            errText.includes('PGRST205')
-          ) {
+      // Upload remaining chunks with bounded concurrency (3) for fast 10,000+ item sync
+      const concurrency = 3;
+      for (let i = 1; i < chunks.length; i += concurrency) {
+        const batchGroup = chunks.slice(i, i + concurrency);
+        const groupResults = await Promise.all(
+          batchGroup.map((chunk) => this.uploadSingleChunkWithAdaptation(cfg, chunk))
+        );
+
+        for (let j = 0; j < groupResults.length; j++) {
+          const res = groupResults[j];
+          const chunk = batchGroup[j];
+          if (!res.ok) {
             return {
               ok: false,
               synced,
               syncedIds,
-              error:
-                'Tabel "public.products" belum dibuat di Supabase. Silakan jalankan SQL Schema di menu SQL Editor Supabase Anda terlebih dahulu.',
+              error: res.error,
             };
           }
-          return {
-            ok: false,
-            synced,
-            syncedIds,
-            error: `Supabase error (${resp.status}): ${errText.slice(0, 150)}`,
-          };
-        }
-
-        for (const r of chunk) {
-          if (r.id) syncedIds.push(r.id);
-        }
-        synced += chunk.length;
-        if (onProgress) {
-          onProgress(synced, total);
+          synced += chunk.length;
+          syncedIds.push(...res.syncedIds);
+          if (onProgress) onProgress(synced, total);
         }
       }
 
@@ -583,25 +801,8 @@ class SupabaseService {
 
   // Upsert a single product
   async upsertSingleProduct(product: Product): Promise<boolean> {
-    if (!this.isConfigured()) return false;
-    const cfg = this.getConfig();
-    try {
-      const resp = await this.requestWithKeyFallback(
-        `${cfg.url}/rest/v1/products?on_conflict=id`,
-        cfg.anonKey,
-        {
-          method: 'POST',
-          body: JSON.stringify([mapProductToRow(product)]),
-        },
-        {
-          'Content-Type': 'application/json',
-          Prefer: 'resolution=merge-duplicates,return=minimal',
-        }
-      );
-      return resp.ok;
-    } catch {
-      return false;
-    }
+    const res = await this.upsertProductsBatch([product]);
+    return res.ok;
   }
 
   // Delete a single product from Supabase
@@ -647,7 +848,7 @@ class SupabaseService {
           if (r.id) ids.push(r.id);
         }
         if (rows.length < pageSize) break;
-        offset += pageSize;
+        offset += rows.length;
         if (offset >= 100000) break;
       }
       return ids;

@@ -14,7 +14,13 @@ import {
 } from '../types';
 import { INITIAL_STORES, INITIAL_TEMPLATES, INITIAL_USERS } from '../data/initialData';
 import { audioService } from './audioService';
-import { idbGetProducts, idbSaveProducts, idbClearProducts, supabaseService } from './supabaseService';
+import {
+  idbGetProducts,
+  idbSaveProducts,
+  idbClearProducts,
+  supabaseService,
+  serverCatalogService,
+} from './supabaseService';
 import {
   detectBarcodeType,
   generateValidEan13,
@@ -40,7 +46,38 @@ const STORAGE_KEYS = {
   ALERTS: 'aman_label_alerts_v1',
   OFFLINE_QUEUE: 'aman_label_offline_queue_v1',
   SIMULATED_OFFLINE: 'aman_label_simulated_offline_v1',
+  LAST_CATALOG_SYNC_AT: 'aman_label_last_catalog_sync_at_v1',
 };
+
+const LEGACY_DEMO_IDS = new Set([
+  'prod-1',
+  'prod-2',
+  'prod-3',
+  'prod-4',
+  'prod-5',
+  'prod-6',
+  'prod-7',
+  'prod-8',
+  'prod-9',
+  'prod-10',
+  'prod-fresh-1',
+]);
+
+// Fast deterministic FNV-1a fingerprint across catalog items to detect price/barcode/stock updates across devices
+function computeCatalogFingerprint(products: Product[]): string {
+  if (!products || products.length === 0) return '0:0';
+  let hash = 2166136261;
+  for (let i = 0; i < products.length; i++) {
+    const p = products[i];
+    const krgQty = p.stocks?.['store-krg']?.quantity ?? 0;
+    const entry = `${p.sku || ''}|${p.barcode || ''}|${p.name || ''}|${p.pricing?.unitPrice ?? 0}|${p.pricing?.bulkPrice ?? 0}|${p.category || ''}|${krgQty}`;
+    for (let j = 0; j < entry.length; j++) {
+      hash ^= entry.charCodeAt(j);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return `${products.length}:${hash >>> 0}`;
+}
 
 // Normalize category names so "FRESH" and "Fresh" don't create duplicate categories
 export const normalizeCategoryName = (raw?: string): string => {
@@ -80,6 +117,10 @@ class StorageService {
   private channel: BroadcastChannel | null = null;
   private listeners: Set<() => void> = new Set();
   private memoryProducts: Product[] | null = null;
+  private remoteSyncInProgress = false;
+  private isMutatingRemote = false;
+  private lastRemoteSyncTriggerMs = 0;
+  private syncIntervalId: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -88,7 +129,7 @@ class StorageService {
         this.channel.onmessage = async (event) => {
           if (event.data?.type === 'SYNC_EVENT') {
             const idbProds = await idbGetProducts();
-            if (idbProds && idbProds.length > 0) {
+            if (idbProds) {
               this.memoryProducts = idbProds;
             }
             this.notifyListeners();
@@ -102,12 +143,40 @@ class StorageService {
     if (typeof window !== 'undefined') {
       window.addEventListener('storage', () => this.notifyListeners());
       window.addEventListener('online', () => this.handleNetworkRestored());
+      window.addEventListener('focus', () => {
+        this.triggerThrottledRemoteSync();
+      });
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            this.triggerThrottledRemoteSync();
+          }
+        });
+      }
+      this.syncIntervalId = setInterval(() => {
+        if (this.isOnline() && !this.isMutatingRemote) {
+          this.syncWithRemoteStores().catch(() => {});
+        }
+      }, 45000);
     }
 
     this.initDefaults();
   }
 
-  // Persist products safely across Memory + IndexedDB (100MB+) + localStorage fallback (if <= 1500 items)
+  isSyncingRemote(): boolean {
+    return this.remoteSyncInProgress;
+  }
+
+  private triggerThrottledRemoteSync() {
+    const now = Date.now();
+    if (now - this.lastRemoteSyncTriggerMs < 4000) return;
+    this.lastRemoteSyncTriggerMs = now;
+    if (this.isOnline() && !this.isMutatingRemote) {
+      this.syncWithRemoteStores().catch(() => {});
+    }
+  }
+
+  // Persist products safely across Memory + IndexedDB (100MB+) + localStorage fallback (if <= 1800 items)
   private persistProducts(products: Product[]) {
     this.memoryProducts = products;
     // Save full dataset to IndexedDB (handles 10,000 - 100,000+ items without QuotaExceededError)
@@ -122,7 +191,7 @@ class StorageService {
   }
 
   private writeLocalProductsFallback(products: Product[]) {
-    // Only write to localStorage if dataset is small enough (< 2000 items), and always wrap in try/catch
+    // Only write to localStorage if dataset is small enough (<= 1800 items), and always wrap in try/catch
     if (typeof window !== 'undefined') {
       try {
         if (products.length <= 1800) {
@@ -140,7 +209,7 @@ class StorageService {
     }
   }
 
-  // Clean, repair (including 0896860100468 -> 089686010046), normalize canonical SKU IDs, and deduplicate catalog
+  // Clean, repair (including 0896860100468 -> 089686010046), preserve existing IDs, and deduplicate catalog
   private normalizeAndDeduplicateCatalog(rawProducts: Product[]): {
     products: Product[];
     repairedProducts: Product[];
@@ -149,7 +218,8 @@ class StorageService {
     const products: Product[] = [];
     const repairedById = new Map<string, Product>();
     const obsoleteIdSet = new Set<string>();
-    const skuToIdx = new Map<string, { index: number; wasCanonicalId: boolean }>();
+    const skuToIdx = new Map<string, { index: number; isPreferredId: boolean }>();
+    const usedIds = new Set<string>();
 
     for (const rawProd of rawProducts) {
       if (!rawProd) continue;
@@ -168,7 +238,7 @@ class StorageService {
         pricing: { ...(rawProd.pricing || { unitLabel: 'PCS', unitQuantity: 1, unitPrice: 0 }) },
         stocks: { ...(rawProd.stocks || {}) },
       };
-      let changed = false;
+      let needsRemoteRepair = false;
 
       if (p.name && p.name.includes(';')) {
         const semiParts = p.name.split(';').map((s) => s.trim());
@@ -190,7 +260,7 @@ class StorageService {
               p.pricing.bulkPrice = extractedPrice > 0 ? Math.round(extractedPrice * 22) : 0;
             }
             p.barcode = sanitizeBarcodeValue(extractedBarcode, p.sku || p.name);
-            changed = true;
+            needsRemoteRepair = true;
           }
         }
       }
@@ -198,25 +268,22 @@ class StorageService {
       const cleanSku = (p.sku || '').trim();
       if (cleanSku !== p.sku) {
         p.sku = cleanSku;
-        changed = true;
       }
 
       const cleanBc = sanitizeBarcodeValue(p.barcode, p.sku || p.name);
       if (cleanBc !== p.barcode) {
         p.barcode = cleanBc;
-        changed = true;
+        needsRemoteRepair = true;
       }
 
       const detectedType = detectBarcodeType(cleanBc);
       if (p.barcodeType !== detectedType) {
         p.barcodeType = detectedType;
-        changed = true;
       }
 
       const cleanCat = normalizeCategoryName(p.category);
       if (cleanCat !== p.category) {
         p.category = cleanCat;
-        changed = true;
       }
 
       INITIAL_STORES.forEach((store) => {
@@ -228,46 +295,59 @@ class StorageService {
             minThreshold: legacyStock?.minThreshold ?? 20,
             lastUpdated: new Date().toISOString(),
           };
-          changed = true;
         } else if (p.stocks[store.id].quantity < 0 || isNaN(p.stocks[store.id].quantity)) {
           p.stocks[store.id] = {
             ...p.stocks[store.id],
             quantity: Math.max(0, p.stocks[store.id].quantity || 0),
           };
-          changed = true;
         }
       });
 
       const canonicalId = cleanSku
         ? `prod-sku-${cleanSku.replace(/[^a-zA-Z0-9_-]/g, '')}`
-        : p.id;
-      const wasCanonicalId = p.id === canonicalId;
+        : `prod-${Date.now()}-${products.length}`;
 
-      if (cleanSku && p.id && p.id !== canonicalId) {
-        obsoleteIdSet.add(p.id);
+      if (!p.id || LEGACY_DEMO_IDS.has(p.id)) {
+        if (p.id && LEGACY_DEMO_IDS.has(p.id)) {
+          obsoleteIdSet.add(p.id);
+        }
         p.id = canonicalId;
-        changed = true;
+        needsRemoteRepair = true;
       }
+
+      const isPreferredId = !LEGACY_DEMO_IDS.has(p.id) && p.id.startsWith('prod-sku-');
 
       if (cleanSku) {
         const skuKey = cleanSku.toLowerCase();
         const existingEntry = skuToIdx.get(skuKey);
         if (existingEntry !== undefined) {
-          // Prefer the row that already had the canonical prod-sku-* ID over legacy prod-1..prod-10 rows
-          if (wasCanonicalId && !existingEntry.wasCanonicalId) {
+          const prevProd = products[existingEntry.index];
+          if (isPreferredId && !existingEntry.isPreferredId) {
+            if (prevProd.id && prevProd.id !== p.id) {
+              obsoleteIdSet.add(prevProd.id);
+              repairedById.delete(prevProd.id);
+            }
             products[existingEntry.index] = p;
-            skuToIdx.set(skuKey, { index: existingEntry.index, wasCanonicalId: true });
+            skuToIdx.set(skuKey, { index: existingEntry.index, isPreferredId: true });
             repairedById.set(p.id, p);
           } else {
-            repairedById.set(products[existingEntry.index].id, products[existingEntry.index]);
+            if (p.id && p.id !== prevProd.id) {
+              obsoleteIdSet.add(p.id);
+            }
+            repairedById.set(prevProd.id, prevProd);
           }
           continue;
         }
-        skuToIdx.set(skuKey, { index: products.length, wasCanonicalId });
+        skuToIdx.set(skuKey, { index: products.length, isPreferredId });
       }
 
+      if (usedIds.has(p.id)) {
+        p.id = canonicalId;
+      }
+      usedIds.add(p.id);
+
       products.push(p);
-      if (changed) {
+      if (needsRemoteRepair) {
         repairedById.set(p.id, p);
       }
     }
@@ -326,7 +406,8 @@ class StorageService {
       }
     }
 
-    // Hydrate full 10,000+ dataset from IndexedDB (and Supabase Cloud if configured)
+    // Hydrate full 10,000+ dataset from IndexedDB, then synchronize across Server & Supabase Cloud
+    this.remoteSyncInProgress = true;
     idbGetProducts()
       .then((idbProds) => {
         if (idbProds && idbProds.length > 0) {
@@ -346,9 +427,12 @@ class StorageService {
       })
       .catch(() => {})
       .finally(() => {
-        if (supabaseService.isConfigured() && this.isOnline()) {
-          this.pullAllFromSupabase().catch(() => {});
-        }
+        this.syncWithRemoteStores()
+          .catch(() => {})
+          .finally(() => {
+            this.remoteSyncInProgress = false;
+            this.notifyListeners();
+          });
       });
 
     if (!localStorage.getItem(STORAGE_KEYS.TEMPLATES)) {
@@ -430,6 +514,132 @@ class StorageService {
     setTimeout(() => this.evaluateStockAlerts(), 500);
   }
 
+  // Bidirectional Cross-Device Synchronization (Shared Server Store + Supabase Cloud)
+  async syncWithRemoteStores(): Promise<void> {
+    if (!this.isOnline() || this.isMutatingRemote) return;
+
+    const localProducts = this.getProducts();
+    const localCount = localProducts.length;
+    const localFp = computeCatalogFingerprint(localProducts);
+
+    const [serverRes, supabaseRes] = await Promise.all([
+      serverCatalogService.fetchServerCatalog(),
+      supabaseService.isConfigured()
+        ? supabaseService.fetchAllProductsWithStatus()
+        : Promise.resolve({ products: null, error: 'Not configured' }),
+    ]);
+
+    if (this.isMutatingRemote) return;
+
+    const serverNorm =
+      serverRes.ok && serverRes.products
+        ? this.normalizeAndDeduplicateCatalog(serverRes.products)
+        : null;
+    const supabaseNorm =
+      supabaseRes.products !== null
+        ? this.normalizeAndDeduplicateCatalog(supabaseRes.products)
+        : null;
+
+    const serverProducts = serverNorm ? serverNorm.products : null;
+    const supabaseProducts = supabaseNorm ? supabaseNorm.products : null;
+
+    const serverCount = serverProducts ? serverProducts.length : 0;
+    const supabaseCount = supabaseProducts ? supabaseProducts.length : 0;
+
+    // 1. Choose the authoritative remote catalog if either Server or Supabase has data
+    let bestRemoteProducts: Product[] | null = null;
+    let bestRemoteSource: 'server' | 'supabase' | null = null;
+
+    if (serverCount > 0 && supabaseCount > 0) {
+      const serverFp = computeCatalogFingerprint(serverProducts!);
+      const supabaseFp = computeCatalogFingerprint(supabaseProducts!);
+      if (serverFp === supabaseFp) {
+        bestRemoteProducts = serverProducts;
+        bestRemoteSource = 'server';
+      } else if (serverCount >= supabaseCount) {
+        bestRemoteProducts = serverProducts;
+        bestRemoteSource = 'server';
+      } else {
+        bestRemoteProducts = supabaseProducts;
+        bestRemoteSource = 'supabase';
+      }
+    } else if (serverCount > 0) {
+      bestRemoteProducts = serverProducts;
+      bestRemoteSource = 'server';
+    } else if (supabaseCount > 0) {
+      bestRemoteProducts = supabaseProducts;
+      bestRemoteSource = 'supabase';
+    }
+
+    // 2. Self-Healing Auto-Push:
+    //    If this device already has the imported master catalog in IndexedDB (e.g. 10,133 items)
+    //    and remote stores are empty (or only have < 50 demo items while local has > 100 items),
+    //    automatically push this device's catalog to the remote stores so other devices receive it!
+    const localHasMasterCatalog =
+      localCount > 0 &&
+      (bestRemoteProducts === null || (localCount > 100 && bestRemoteProducts.length < 50));
+
+    if (localHasMasterCatalog) {
+      if (serverRes.ok && serverCount < localCount) {
+        await serverCatalogService.pushServerCatalog({
+          mode: 'replace',
+          products: localProducts,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      if (supabaseService.isConfigured() && supabaseCount < localCount) {
+        await supabaseService.upsertProductsBatch(localProducts);
+      }
+      return;
+    }
+
+    // 3. Cross-Device Delivery & Overwrite:
+    //    If remote has products and local is empty OR remote has a different fingerprint (updated prices/barcodes/items),
+    //    update local storage & IndexedDB immediately.
+    if (bestRemoteProducts && bestRemoteProducts.length > 0) {
+      const remoteFp = computeCatalogFingerprint(bestRemoteProducts);
+      if (localCount === 0 || remoteFp !== localFp) {
+        await this.persistProductsAsync(bestRemoteProducts);
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
+            localStorage.setItem(STORAGE_KEYS.LAST_CATALOG_SYNC_AT, new Date().toISOString());
+          } catch {}
+        }
+        this.broadcastChange();
+      }
+
+      // Cross-heal between Server (/api/catalog) and Supabase Cloud if one was empty or out of sync
+      if (bestRemoteSource === 'supabase' && serverRes.ok) {
+        const serverFp = serverProducts ? computeCatalogFingerprint(serverProducts) : '0:0';
+        if (serverFp !== remoteFp) {
+          serverCatalogService
+            .pushServerCatalog({
+              mode: 'replace',
+              products: bestRemoteProducts,
+              updatedAt: new Date().toISOString(),
+            })
+            .catch(() => {});
+        }
+      } else if (bestRemoteSource === 'server' && supabaseService.isConfigured()) {
+        const supabaseFp = supabaseProducts ? computeCatalogFingerprint(supabaseProducts) : '0:0';
+        if (supabaseFp !== remoteFp) {
+          supabaseService.upsertProductsBatch(bestRemoteProducts).catch(() => {});
+        }
+      }
+
+      // If Supabase had any legacy corrupted UPC-A barcodes or duplicate rows, heal sequentially
+      if (supabaseNorm && supabaseService.isConfigured()) {
+        if (supabaseNorm.repairedProducts.length > 0) {
+          await supabaseService.upsertProductsBatch(supabaseNorm.repairedProducts).catch(() => {});
+        }
+        if (supabaseNorm.obsoleteIds.length > 0) {
+          await supabaseService.deleteProductsByIds(supabaseNorm.obsoleteIds).catch(() => {});
+        }
+      }
+    }
+  }
+
   subscribe(listener: () => void) {
     this.listeners.add(listener);
     return () => {
@@ -459,6 +669,7 @@ class StorageService {
     this.broadcastChange();
     if (!offline) {
       this.processOfflineQueue();
+      this.syncWithRemoteStores().catch(() => {});
     }
   }
 
@@ -471,6 +682,7 @@ class StorageService {
   private handleNetworkRestored() {
     if (!this.isSimulatedOffline()) {
       this.processOfflineQueue();
+      this.syncWithRemoteStores().catch(() => {});
     }
   }
 
@@ -519,8 +731,13 @@ class StorageService {
     }
     this.memoryProducts = [];
     await idbClearProducts();
-    if (clearSupabaseAlso && this.isOnline() && supabaseService.isConfigured()) {
-      await supabaseService.deleteAllProducts().catch(() => {});
+    if (clearSupabaseAlso && this.isOnline()) {
+      await Promise.all([
+        serverCatalogService.clearServerCatalog().catch(() => false),
+        supabaseService.isConfigured()
+          ? supabaseService.deleteAllProducts().catch(() => false)
+          : Promise.resolve(false),
+      ]);
     }
     this.broadcastChange();
   }
@@ -595,9 +812,18 @@ class StorageService {
 
     this.persistProducts(products);
 
-    if (this.isOnline() && supabaseService.isConfigured()) {
-      supabaseService.upsertSingleProduct(product).catch(() => {});
-    } else if (!this.isOnline()) {
+    if (this.isOnline()) {
+      serverCatalogService
+        .pushServerCatalog({
+          mode: 'upsert',
+          products: [product],
+          updatedAt: new Date().toISOString(),
+        })
+        .catch(() => {});
+      if (supabaseService.isConfigured()) {
+        supabaseService.upsertSingleProduct(product).catch(() => {});
+      }
+    } else {
       this.enqueueOfflineItem({
         id: `queue-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         type: 'PRODUCT_UPDATE',
@@ -615,8 +841,18 @@ class StorageService {
   deleteProduct(productId: string) {
     const products = this.getProducts().filter((p) => p.id !== productId);
     this.persistProducts(products);
-    if (this.isOnline() && supabaseService.isConfigured()) {
-      supabaseService.deleteSingleProduct(productId).catch(() => {});
+    if (this.isOnline()) {
+      serverCatalogService
+        .pushServerCatalog({
+          mode: 'upsert',
+          products: [],
+          deletedIds: [productId],
+          updatedAt: new Date().toISOString(),
+        })
+        .catch(() => {});
+      if (supabaseService.isConfigured()) {
+        supabaseService.deleteSingleProduct(productId).catch(() => {});
+      }
     }
     this.broadcastChange();
   }
@@ -646,8 +882,17 @@ class StorageService {
     product.stocks[storeId] = updatedStock;
     this.persistProducts(products);
 
-    if (this.isOnline() && supabaseService.isConfigured()) {
-      supabaseService.upsertSingleProduct(product).catch(() => {});
+    if (this.isOnline()) {
+      serverCatalogService
+        .pushServerCatalog({
+          mode: 'upsert',
+          products: [product],
+          updatedAt: new Date().toISOString(),
+        })
+        .catch(() => {});
+      if (supabaseService.isConfigured()) {
+        supabaseService.upsertSingleProduct(product).catch(() => {});
+      }
     }
 
     // Log adjustment transaction
@@ -722,8 +967,17 @@ class StorageService {
     product.stocks[toStoreId].lastUpdated = new Date().toISOString();
 
     this.persistProducts(products);
-    if (this.isOnline() && supabaseService.isConfigured()) {
-      supabaseService.upsertSingleProduct(product).catch(() => {});
+    if (this.isOnline()) {
+      serverCatalogService
+        .pushServerCatalog({
+          mode: 'upsert',
+          products: [product],
+          updatedAt: new Date().toISOString(),
+        })
+        .catch(() => {});
+      if (supabaseService.isConfigured()) {
+        supabaseService.upsertSingleProduct(product).catch(() => {});
+      }
     }
 
     const transfer: StockTransfer = {
@@ -797,13 +1051,11 @@ class StorageService {
     const queue = this.getOfflineQueue();
     if (queue.length === 0) return { syncedCount: 0 };
 
-    // Simulate reliable cloud background sync
     const syncedCount = queue.length;
     localStorage.removeItem(STORAGE_KEYS.OFFLINE_QUEUE);
     this.broadcastChange();
 
-    // Trigger push notification of sync completion
-    if ('Notification' in window && Notification.permission === 'granted') {
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
       new Notification('Cloud Synchronization Completed', {
         body: `${syncedCount} queued inventory update(s) successfully synced across all store locations.`,
         icon: '/icon-192.svg',
@@ -1112,7 +1364,7 @@ class StorageService {
               for (const dup of sameSkuList) {
                 if (dup !== matchedProd) {
                   removedProductsSet.add(dup);
-                  if (dup.id && dup.id !== canonicalId) {
+                  if (dup.id) {
                     removedIdSet.add(dup.id);
                   }
                   touchedById.delete(dup.id);
@@ -1121,9 +1373,12 @@ class StorageService {
               skuAllMatchesMap.set(skuLower, [matchedProd]);
             }
             matchedProd.sku = rawSku;
-            if (matchedProd.id !== canonicalId) {
-              removedIdSet.add(matchedProd.id);
-              touchedById.delete(matchedProd.id);
+            // Preserve existing ID so Supabase ON CONFLICT (id) updates in-place; only replace legacy demo IDs
+            if (!matchedProd.id || LEGACY_DEMO_IDS.has(matchedProd.id)) {
+              if (matchedProd.id) {
+                removedIdSet.add(matchedProd.id);
+                touchedById.delete(matchedProd.id);
+              }
               matchedProd.id = canonicalId;
             }
             skuMap.set(skuLower, matchedProd);
@@ -1297,7 +1552,7 @@ class StorageService {
     };
   }
 
-  // --- Bulk Product Import (Supports 10,000 - 100,000+ Items with O(1) Lookup & IndexedDB + Supabase) ---
+  // --- Bulk Product Import (Supports 10,000 - 100,000+ Items with O(1) Lookup & IndexedDB + Server + Supabase) ---
   importProducts(
     records: ImportProductRecord[],
     targetStoreId: string = 'store-krg',
@@ -1321,26 +1576,36 @@ class StorageService {
 
     this.persistProducts(prepared.finalProducts);
 
-    // Sync imported/updated items to Supabase in background if configured and enabled
-    if (syncToCloud && this.isOnline() && supabaseService.isConfigured() && prepared.touchedProducts.length > 0) {
-      supabaseService
-        .upsertProductsBatch(prepared.touchedProducts)
-        .then(async (res) => {
-          if (res.ok && prepared.removedIds.length > 0) {
-            await supabaseService.deleteProductsByIds(prepared.removedIds);
-          }
-          if (res.ok && replaceAllLocal) {
-            const remoteIds = await supabaseService.fetchAllProductIds();
-            if (remoteIds) {
-              const keepSet = new Set(prepared.finalProducts.map((p) => p.id));
-              const staleIds = remoteIds.filter((id) => !keepSet.has(id));
-              if (staleIds.length > 0) {
-                await supabaseService.deleteProductsByIds(staleIds);
-              }
-            }
-          }
+    if (syncToCloud && this.isOnline() && prepared.touchedProducts.length > 0) {
+      serverCatalogService
+        .pushServerCatalog({
+          mode: replaceAllLocal ? 'replace' : 'upsert',
+          products: replaceAllLocal ? prepared.finalProducts : prepared.touchedProducts,
+          deletedIds: prepared.removedIds,
+          updatedAt: new Date().toISOString(),
         })
         .catch(() => {});
+
+      if (supabaseService.isConfigured()) {
+        supabaseService
+          .upsertProductsBatch(prepared.touchedProducts)
+          .then(async (res) => {
+            if (res.ok && prepared.removedIds.length > 0) {
+              await supabaseService.deleteProductsByIds(prepared.removedIds);
+            }
+            if (res.ok && replaceAllLocal) {
+              const remoteIds = await supabaseService.fetchAllProductIds();
+              if (remoteIds) {
+                const keepSet = new Set(prepared.finalProducts.map((p) => p.id));
+                const staleIds = remoteIds.filter((id) => !keepSet.has(id));
+                if (staleIds.length > 0) {
+                  await supabaseService.deleteProductsByIds(staleIds);
+                }
+              }
+            }
+          })
+          .catch(() => {});
+      }
     }
 
     this.evaluateStockAlerts();
@@ -1354,7 +1619,7 @@ class StorageService {
     };
   }
 
-  // Transactional Bulk Import with pre-commit validation, deep state snapshot, and local + cloud rollback on failure
+  // Transactional Bulk Import with pre-commit validation, deep state snapshot, and Shared Server + Supabase Cloud sync
   async importProductsTransactional(
     records: ImportProductRecord[],
     targetStoreId: string = 'store-krg',
@@ -1380,9 +1645,6 @@ class StorageService {
 
     const hasWindow = typeof window !== 'undefined';
     const prevProductsSnapshot = this.getProducts().map((p) => this.cloneProductForSnapshot(p));
-    const prevByIdMap = new Map<string, Product>();
-    prevProductsSnapshot.forEach((p) => prevByIdMap.set(p.id, p));
-
     const prevPurgedFlag = hasWindow ? localStorage.getItem(STORAGE_KEYS.LOCAL_DATA_PURGED) : null;
     const prevAlertsRaw = hasWindow ? localStorage.getItem(STORAGE_KEYS.ALERTS) : null;
 
@@ -1405,6 +1667,7 @@ class StorageService {
       this.broadcastChange();
     };
 
+    this.isMutatingRemote = true;
     try {
       const prepared = this.prepareImportMutation(
         records,
@@ -1439,52 +1702,71 @@ class StorageService {
 
       let cloudSynced = 0;
       let cloudAttempted = false;
+      let serverSyncedOk = false;
 
-      if (
-        syncToCloud &&
-        this.isOnline() &&
-        supabaseService.isConfigured() &&
-        prepared.touchedProducts.length > 0
-      ) {
-        cloudAttempted = true;
-        const cloudRes = await supabaseService.upsertProductsBatch(prepared.touchedProducts, onProgress);
+      if (syncToCloud && this.isOnline() && prepared.touchedProducts.length > 0) {
+        const mutationIso = new Date().toISOString();
 
-        if (!cloudRes.ok) {
-          // Keep the newly imported Excel data active locally so the user never loses their update
-          // if Supabase experiences a temporary network/batch error.
-          this.evaluateStockAlerts();
-          this.broadcastChange();
+        // 1. Push to Shared Server Catalog (/api/catalog) for instant LAN / multi-device sync
+        serverSyncedOk = await serverCatalogService.pushServerCatalog({
+          mode: replaceAllLocal ? 'replace' : 'upsert',
+          products: replaceAllLocal ? prepared.finalProducts : prepared.touchedProducts,
+          deletedIds: prepared.removedIds,
+          updatedAt: mutationIso,
+        });
 
-          return {
-            ok: true,
-            added: prepared.added,
-            updated: prepared.updated,
-            skipped: prepared.skipped,
-            duplicatesMerged: prepared.duplicatesMerged,
-            cloudSynced: cloudRes.synced || 0,
-            cloudAttempted: true,
-            rolledBack: false,
-            error: cloudRes.error,
-            products: prepared.finalProducts,
-          };
-        }
+        // 2. Push to Supabase Cloud
+        if (supabaseService.isConfigured()) {
+          cloudAttempted = true;
+          const cloudRes = await supabaseService.upsertProductsBatch(
+            prepared.touchedProducts,
+            onProgress
+          );
 
-        cloudSynced = cloudRes.synced;
+          if (!cloudRes.ok) {
+            this.evaluateStockAlerts();
+            this.broadcastChange();
 
-        // Clean up duplicate SKU rows and, when replacing the entire catalog, any obsolete remote IDs
-        const idsToDelete = new Set<string>(prepared.removedIds);
-        if (replaceAllLocal) {
-          const remoteIds = await supabaseService.fetchAllProductIds();
-          if (remoteIds) {
-            const keepSet = new Set(prepared.finalProducts.map((p) => p.id));
-            for (const rid of remoteIds) {
-              if (!keepSet.has(rid)) idsToDelete.add(rid);
+            return {
+              ok: true,
+              added: prepared.added,
+              updated: prepared.updated,
+              skipped: prepared.skipped,
+              duplicatesMerged: prepared.duplicatesMerged,
+              cloudSynced: serverSyncedOk ? prepared.touchedProducts.length : cloudRes.synced || 0,
+              cloudAttempted: true,
+              rolledBack: false,
+              error: serverSyncedOk ? undefined : cloudRes.error,
+              products: prepared.finalProducts,
+            };
+          }
+
+          cloudSynced = cloudRes.synced;
+
+          // Clean up duplicate SKU rows and, when replacing the entire catalog, any obsolete remote IDs
+          const idsToDelete = new Set<string>(prepared.removedIds);
+          if (replaceAllLocal) {
+            const remoteIds = await supabaseService.fetchAllProductIds();
+            if (remoteIds) {
+              const keepSet = new Set(prepared.finalProducts.map((p) => p.id));
+              for (const rid of remoteIds) {
+                if (!keepSet.has(rid)) idsToDelete.add(rid);
+              }
             }
           }
+          if (idsToDelete.size > 0) {
+            await supabaseService.deleteProductsByIds(Array.from(idsToDelete));
+          }
+        } else if (serverSyncedOk) {
+          cloudAttempted = true;
+          cloudSynced = prepared.touchedProducts.length;
         }
-        if (idsToDelete.size > 0) {
-          await supabaseService.deleteProductsByIds(Array.from(idsToDelete));
-        }
+      }
+
+      if (hasWindow) {
+        try {
+          localStorage.setItem(STORAGE_KEYS.LAST_CATALOG_SYNC_AT, new Date().toISOString());
+        } catch {}
       }
 
       this.evaluateStockAlerts();
@@ -1517,6 +1799,8 @@ class StorageService {
           'Terjadi error saat memproses import. Sistem telah melakukan rollback otomatis ke katalog sebelumnya.',
         products: prevProductsSnapshot,
       };
+    } finally {
+      this.isMutatingRemote = false;
     }
   }
 
@@ -1563,50 +1847,83 @@ class StorageService {
     onProgress?: (completed: number, total: number) => void
   ): Promise<{ ok: boolean; synced: number; error?: string }> {
     const products = this.getProducts();
+    await serverCatalogService
+      .pushServerCatalog({
+        mode: 'replace',
+        products,
+        updatedAt: new Date().toISOString(),
+      })
+      .catch(() => false);
     return supabaseService.upsertProductsBatch(products, onProgress);
   }
 
   async pullAllFromSupabase(
     onProgress?: (loaded: number) => void
   ): Promise<{ ok: boolean; count: number; error?: string }> {
-    if (!supabaseService.isConfigured()) {
-      return { ok: false, count: 0, error: 'Supabase belum dikonfigurasi' };
-    }
-    const res = await supabaseService.fetchAllProductsWithStatus(onProgress);
-    if (!res.products) {
+    const [supabaseRes, serverRes] = await Promise.all([
+      supabaseService.isConfigured()
+        ? supabaseService.fetchAllProductsWithStatus(onProgress)
+        : Promise.resolve({ products: null, error: 'Supabase belum dikonfigurasi' }),
+      serverCatalogService.fetchServerCatalog(),
+    ]);
+
+    const rawProducts =
+      supabaseRes.products && supabaseRes.products.length > 0
+        ? supabaseRes.products
+        : serverRes.ok && serverRes.products && serverRes.products.length > 0
+          ? serverRes.products
+          : null;
+
+    if (!rawProducts) {
+      if (supabaseRes.products && supabaseRes.products.length === 0) {
+        return {
+          ok: false,
+          count: 0,
+          error:
+            'Tabel public.products di Supabase masih kosong (0 baris). Silakan klik "Import CSV / Excel" untuk mengimpor master item list Anda.',
+        };
+      }
       return {
         ok: false,
         count: 0,
         error:
-          res.error ||
+          supabaseRes.error ||
           'Gagal mengambil data dari Supabase (Pastikan SQL Schema sudah dijalankan di SQL Editor Supabase).',
       };
     }
-    if (res.products.length === 0) {
-      return {
-        ok: false,
-        count: 0,
-        error:
-          'Tabel public.products di Supabase masih kosong (0 baris). Push master data dari Laptop terlebih dahulu atau muat Master CSV langsung.',
-      };
-    }
+
     if (typeof window !== 'undefined') {
       try {
         localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
+        localStorage.setItem(STORAGE_KEYS.LAST_CATALOG_SYNC_AT, new Date().toISOString());
       } catch {}
     }
 
-    const normalized = this.normalizeAndDeduplicateCatalog(res.products);
-    this.persistProducts(normalized.products);
+    const normalized = this.normalizeAndDeduplicateCatalog(rawProducts);
+    await this.persistProductsAsync(normalized.products);
     this.broadcastChange();
 
-    // Automatically heal any legacy corrupted UPC-A barcodes or duplicate legacy IDs in Supabase in the background
+    // Keep both Server (/api/catalog) and Supabase Cloud in sync sequentially (never racing)
     if (this.isOnline()) {
-      if (normalized.repairedProducts.length > 0) {
-        supabaseService.upsertProductsBatch(normalized.repairedProducts).catch(() => {});
-      }
-      if (normalized.obsoleteIds.length > 0) {
-        supabaseService.deleteProductsByIds(normalized.obsoleteIds).catch(() => {});
+      serverCatalogService
+        .pushServerCatalog({
+          mode: 'replace',
+          products: normalized.products,
+          updatedAt: new Date().toISOString(),
+        })
+        .catch(() => {});
+
+      if (supabaseService.isConfigured()) {
+        if (!supabaseRes.products || supabaseRes.products.length === 0) {
+          await supabaseService.upsertProductsBatch(normalized.products).catch(() => {});
+        } else {
+          if (normalized.repairedProducts.length > 0) {
+            await supabaseService.upsertProductsBatch(normalized.repairedProducts).catch(() => {});
+          }
+          if (normalized.obsoleteIds.length > 0) {
+            await supabaseService.deleteProductsByIds(normalized.obsoleteIds).catch(() => {});
+          }
+        }
       }
     }
 

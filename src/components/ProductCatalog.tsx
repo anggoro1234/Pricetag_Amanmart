@@ -74,6 +74,7 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
   const [migrationMessage, setMigrationMessage] = useState<string | null>(null);
 
   const isLegacyLocalDemo = storageService.isUsingLegacyLocalDemoData();
+  const isSyncingRemote = storageService.isSyncingRemote();
 
   // Pull latest product catalog directly from Supabase Cloud (repairs legacy barcodes & deduplicates SKUs)
   const handleReplaceWithMaster10k = async () => {
@@ -510,7 +511,14 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
               {paginatedProducts.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-slate-400">
-                    No products matched your search or filters.
+                    {isSyncingRemote && products.length === 0 ? (
+                      <div className="inline-flex items-center gap-2.5 text-emerald-700 font-semibold text-xs">
+                        <RefreshCw className="w-4 h-4 animate-spin text-emerald-600" />
+                        <span>Menyinkronkan katalog produk dari database ke perangkat ini...</span>
+                      </div>
+                    ) : (
+                      'No products matched your search or filters.'
+                    )}
                   </td>
                 </tr>
               ) : (
