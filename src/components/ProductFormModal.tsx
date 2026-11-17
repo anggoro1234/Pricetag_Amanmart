@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, Barcode as BarcodeIcon, Trash2 } from 'lucide-react';
 import { Product, StoreLocation } from '../types';
+import { detectBarcodeType } from '../utils/barcodeUtils';
 
 interface ProductFormModalProps {
   isOpen: boolean;
@@ -120,7 +121,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       id: productToEdit?.id || `prod-${Date.now()}`,
       sku: sku.trim(),
       barcode: barcode.trim(),
-      barcodeType: productToEdit?.barcodeType || 'EAN13',
+      barcodeType: detectBarcodeType(barcode.trim()),
       name: name.trim().toUpperCase(),
       category: category.trim() || 'Grocery',
       brand: brand.trim() || 'General',

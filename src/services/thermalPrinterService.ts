@@ -1,4 +1,5 @@
 import { LabelTemplateConfig, Product, ThermalPrinterSettings } from '../types';
+import { resolveTsplBarcodeType } from '../utils/barcodeUtils';
 
 export interface BluetoothDeviceWrapper {
   device: any;
@@ -118,8 +119,8 @@ class ThermalPrinterService {
       lines.push(`TEXT ${widthDots - 220}, 72, "2", 0, 1, 1, "${bulkPriceFormatted}"`);
     }
 
-    // Barcode (EAN13 or 128)
-    const bcType = product.barcode.length === 13 ? 'EAN13' : '128';
+    // Barcode (EAN13, UPCA, EAN8, or Code 128)
+    const bcType = resolveTsplBarcodeType(product.barcode);
     lines.push(`BARCODE 16, 96, "${bcType}", 55, 1, 0, 2, 2, "${product.barcode}"`);
 
     // SKU and Live Print Date (Today)

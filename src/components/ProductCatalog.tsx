@@ -75,21 +75,24 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
 
   const isLegacyLocalDemo = storageService.isUsingLegacyLocalDemoData();
 
-  // Quick 1-click helper to parse & replace local demo data with the 10,112-row master CSV and sync to Supabase
+  // Pull latest product catalog directly from Supabase Cloud (repairs legacy barcodes & deduplicates SKUs)
   const handleReplaceWithMaster10k = async () => {
     setIsMigratingMaster(true);
-    setMigrationMessage('Memuat 10.112 item dari Master Excel & menghapus data lokal lama...');
+    setMigrationMessage('Menarik katalog produk terbaru langsung dari Database Supabase...');
     try {
-      const { count } = await storageService.loadBundledMasterCsv(activeStore.id, true);
+      const res = await storageService.pullAllFromSupabase();
       setCurrentPage(1);
-      audioService.playPrintCompleteChime();
-
-      setMigrationMessage(
-        `Berhasil! Data lokal lama telah dihapus dan digantikan dengan ${count.toLocaleString('id-ID')} item Master Amanmart (tersimpan di IndexedDB & sedang disinkronkan ke Supabase).`
-      );
+      if (res.ok) {
+        audioService.playPrintCompleteChime();
+        setMigrationMessage(
+          `Berhasil! ${res.count.toLocaleString('id-ID')} item produk terbaru dari Database Supabase telah disinkronkan.`
+        );
+      } else {
+        setMigrationMessage(res.error || 'Tabel Supabase masih kosong. Silakan klik tombol Import untuk mengunggah file Excel Anda.');
+      }
       setTimeout(() => setMigrationMessage(null), 7000);
     } catch (err: any) {
-      setMigrationMessage(`Gagal memuat master data: ${err?.message || 'Unknown error'}`);
+      setMigrationMessage(`Gagal menarik data Supabase: ${err?.message || 'Unknown error'}`);
     } finally {
       setIsMigratingMaster(false);
     }
@@ -247,10 +250,10 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-xs sm:text-sm font-bold text-white">
                   {migrationMessage
-                    ? 'Status Mitigasi & Sinkronisasi Supabase'
+                    ? 'Status Sinkronisasi Database Supabase'
                     : isLegacyLocalDemo
-                    ? 'Mitigasi Data Lokal Lama Terdeteksi (BONELESS PAHA FZ/ KG, dll.)'
-                    : 'Katalog Lokal Kosong — Siap Memuat Data Supabase / Master 10.000+ Item'}
+                    ? 'Data Testing Lokal Lama Terdeteksi'
+                    : 'Sinkronisasi Katalog Database Supabase'}
                 </h3>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/30 border border-emerald-400/40 text-emerald-200">
                   Supabase Terhubung: otbujeoxvwfnqwnpxnnd
@@ -259,7 +262,7 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
               <p className="text-[11px] sm:text-xs text-emerald-100/90 mt-1 leading-relaxed max-w-3xl">
                 {migrationMessage
                   ? migrationMessage
-                  : 'Data lokal lama bawaan browser sudah tidak diperlukan karena sistem kini terintegrasi dengan Supabase & IndexedDB High-Capacity. Klik tombol di kanan untuk langsung mengganti seluruh data lokal lama dengan 10.112 Item Master Excel Anda atau membersihkan data lokal.'}
+                  : 'Sistem kini langsung menggunakan Database Supabase & Import File Excel sebagai sumber data utama (tanpa fallback item testing lokal). Klik tombol di kanan untuk menarik data terbaru dari Supabase atau meng-import file Excel Anda.'}
               </p>
             </div>
           </div>
@@ -278,8 +281,8 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
               )}
               <span>
                 {isMigratingMaster
-                  ? 'Memproses 10.112 Item...'
-                  : 'Ganti dengan 10.112 Item Master & Sync Supabase'}
+                  ? 'Menyinkronkan Supabase...'
+                  : 'Tarik Data Terbaru dari Supabase'}
               </span>
             </button>
 
@@ -516,8 +519,6 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
                   const currentQty = stock?.quantity ?? 0;
                   const threshold = stock?.minThreshold ?? 20;
                   const isLow = currentQty <= threshold;
-                  const isAttachedExample =
-                    product.sku === '1001040' || product.sku === '1001041';
                   const inBatchItem = batchQueue.find((q) => q.product.id === product.id);
 
                   // Total stock across all branches
@@ -543,11 +544,6 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({
                           <div>
                             <div className="font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
                               {product.name}
-                              {isAttachedExample && (
-                                <span className="bg-blue-100 text-blue-700 text-[10px] font-extrabold px-1.5 py-0.5 rounded tracking-tight">
-                                  ★ Attached Example
-                                </span>
-                              )}
                               {inBatchItem && (
                                 <span className="bg-emerald-100 text-emerald-800 text-[10px] font-extrabold px-1.5 py-0.5 rounded">
                                   In Batch ({inBatchItem.quantity}x)

@@ -13,7 +13,30 @@ import {
 } from 'lucide-react';
 import { LabelTemplateConfig, Product, StoreLocation } from '../types';
 import { LabelPreview } from './LabelPreview';
-import { INITIAL_PRODUCTS } from '../data/initialData';
+import { storageService } from '../services/storageService';
+
+const TEMPLATE_PREVIEW_FALLBACK: Product = {
+  id: 'preview-sample-1',
+  sku: '1001040',
+  barcode: '089686010015',
+  barcodeType: 'UPCA',
+  name: 'CONTOH LABEL PRODUK AMANMART',
+  category: 'Grocery',
+  brand: 'Amanmart',
+  department: 'Grocery / General',
+  currency: 'Rp.',
+  pricing: {
+    unitLabel: 'PCS',
+    unitQuantity: 1,
+    unitPrice: 2900,
+    bulkLabel: 'CRT',
+    bulkQuantity: 40,
+    bulkPrice: 113500,
+  },
+  stocks: {},
+  dateEffective: new Date().toLocaleDateString('en-GB'),
+  locationBin: 'A-01-01',
+};
 
 interface TemplateEditorModalProps {
   isOpen: boolean;
@@ -39,7 +62,9 @@ export const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
 
   if (!isOpen) return null;
 
-  const sampleProduct: Product = INITIAL_PRODUCTS[sampleProductIndex] || INITIAL_PRODUCTS[0];
+  const catalogSampleList = storageService.getProducts().slice(0, 20);
+  const previewOptions = catalogSampleList.length > 0 ? catalogSampleList : [TEMPLATE_PREVIEW_FALLBACK];
+  const sampleProduct: Product = previewOptions[sampleProductIndex] || previewOptions[0];
 
   const handleSelectBase = (tmpl: LabelTemplateConfig) => {
     setSelectedId(tmpl.id);
@@ -288,7 +313,7 @@ export const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                   onChange={(e) => setSampleProductIndex(parseInt(e.target.value))}
                   className="text-xs px-2 py-1 bg-white border border-slate-300 rounded font-semibold"
                 >
-                  {INITIAL_PRODUCTS.map((p, idx) => (
+                  {previewOptions.map((p, idx) => (
                     <option key={p.id} value={idx}>
                       {p.name}
                     </option>

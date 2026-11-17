@@ -579,15 +579,6 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCatalog ? 'animate-spin' : ''}`} />
                 Tarik Data Supabase
               </button>
-              <button
-                type="button"
-                disabled={isSyncingCatalog}
-                onClick={handleLoadMasterCatalogLocal}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition"
-              >
-                <Database className="w-3.5 h-3.5" />
-                Muat Master 10.112 Item ke PDA
-              </button>
             </div>
           </>
         )}

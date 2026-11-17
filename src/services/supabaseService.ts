@@ -1,5 +1,6 @@
 import { Product } from '../types';
 import { INITIAL_STORES } from '../data/initialData';
+import { detectBarcodeType, sanitizeBarcodeValue } from '../utils/barcodeUtils';
 
 export interface SupabaseConfig {
   url: string;
@@ -137,55 +138,6 @@ interface SupabaseProductRow {
   Stock?: number;
 }
 
-const generateFallbackEan13 = (seed: string): string => {
-  const cleanNum = (seed || '').replace(/[^0-9]/g, '');
-  let digits9 = '';
-  if (cleanNum.length >= 4 && cleanNum.length <= 9) {
-    digits9 = cleanNum.padStart(9, '0');
-  } else {
-    let hash = 2166136261;
-    const str = seed || 'amanmart';
-    for (let i = 0; i < str.length; i++) {
-      hash ^= str.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    digits9 = (Math.abs(hash) % 900000000 + 100000000).toString().slice(0, 9);
-  }
-  const raw12 = ('899' + digits9).slice(0, 12);
-  let sum = 0;
-  for (let i = 0; i < 12; i++) {
-    const n = parseInt(raw12[i], 10) || 0;
-    sum += i % 2 === 0 ? n : n * 3;
-  }
-  const check = (10 - (sum % 10)) % 10;
-  return raw12 + check.toString();
-};
-
-const ensureValidBarcode = (rawBc: string, seed: string): string => {
-  const clean = (rawBc || '').trim().replace(/\s+/g, '');
-  if (!clean || /^0+$/.test(clean) || clean.length < 5 || /[^0-9]/.test(clean)) {
-    return generateFallbackEan13(seed);
-  }
-  if (clean.length === 12) {
-    let sum = 0;
-    for (let i = 0; i < 12; i++) {
-      const n = parseInt(clean[i], 10) || 0;
-      sum += i % 2 === 0 ? n : n * 3;
-    }
-    return clean + ((10 - (sum % 10)) % 10).toString();
-  }
-  if (clean.length === 13) {
-    const raw12 = clean.slice(0, 12);
-    let sum = 0;
-    for (let i = 0; i < 12; i++) {
-      const n = parseInt(raw12[i], 10) || 0;
-      sum += i % 2 === 0 ? n : n * 3;
-    }
-    return raw12 + ((10 - (sum % 10)) % 10).toString();
-  }
-  return clean;
-};
-
 const toSafeInt = (val: any, fallback: number = 0): number => {
   const n = Number(val);
   return Number.isFinite(n) ? Math.max(0, Math.round(n)) : fallback;
@@ -219,7 +171,8 @@ const mapRowToProduct = (r: SupabaseProductRow, index: number): Product => {
   const rawName = String(r.name || r['Item Name'] || '').trim();
   const name = (rawName || `ITEM SKU ${sku}`).toUpperCase();
   const rawBarcode = String(r.barcode || r.Barcode || '').trim();
-  const barcode = ensureValidBarcode(rawBarcode, sku || name);
+  const barcode = sanitizeBarcodeValue(rawBarcode, sku || name);
+  const barcodeType = detectBarcodeType(barcode);
   const category = String(r.category || r.Category || 'Grocery').trim() || 'Grocery';
   const unitPrice = Math.max(0, Math.round(Number(r.unit_price ?? r.Price ?? 0) || 0));
   const bulkPrice = Math.max(
@@ -256,7 +209,7 @@ const mapRowToProduct = (r: SupabaseProductRow, index: number): Product => {
     id: r.id || `prod-sb-${sku}-${index}`,
     sku,
     barcode,
-    barcodeType: (r.barcode_type as Product['barcodeType']) || 'EAN13',
+    barcodeType,
     name,
     category,
     brand: r.brand || 'General',
@@ -315,7 +268,7 @@ class SupabaseService {
   }
 
   saveConfig(config: SupabaseConfig) {
-    if (typeof window !== 'undefined') return;
+    if (typeof window === 'undefined') return;
     const cleanConfig: SupabaseConfig = {
       ...config,
       url: config.url.trim().replace(/\/+$/, ''),
@@ -671,7 +624,39 @@ class SupabaseService {
     }
   }
 
-  // Delete specific product IDs (used for compensating transaction rollback on partial multi-batch failure)
+  // Fetch all product IDs from Supabase (used when replacing catalog to clean up obsolete remote rows)
+  async fetchAllProductIds(): Promise<string[] | null> {
+    if (!this.isConfigured()) return null;
+    const cfg = this.getConfig();
+    const pageSize = 1000;
+    let offset = 0;
+    const ids: string[] = [];
+
+    try {
+      while (true) {
+        const resp = await this.requestWithKeyFallback(
+          `${cfg.url}/rest/v1/products?select=id&order=id.asc&limit=${pageSize}&offset=${offset}`,
+          cfg.anonKey,
+          { method: 'GET' },
+          { 'Content-Type': 'application/json' }
+        );
+        if (!resp.ok) return null;
+        const rows: { id?: string }[] = await resp.json();
+        if (!Array.isArray(rows) || rows.length === 0) break;
+        for (const r of rows) {
+          if (r.id) ids.push(r.id);
+        }
+        if (rows.length < pageSize) break;
+        offset += pageSize;
+        if (offset >= 100000) break;
+      }
+      return ids;
+    } catch {
+      return null;
+    }
+  }
+
+  // Delete specific product IDs (used for compensating rollback and stale-row cleanup)
   async deleteProductsByIds(ids: string[]): Promise<{ ok: boolean; error?: string }> {
     if (!this.isConfigured() || ids.length === 0) return { ok: true };
     const cfg = this.getConfig();
@@ -682,17 +667,32 @@ class SupabaseService {
       for (let i = 0; i < uniqueIds.length; i += chunkSize) {
         const slice = uniqueIds.slice(i, i + chunkSize);
         const inClause = slice.map((id) => `"${id.replace(/"/g, '\\"')}"`).join(',');
-        const resp = await this.requestWithKeyFallback(
-          `${cfg.url}/rest/v1/products?id=in.${encodeURIComponent(`(${inClause})`)}`,
-          cfg.anonKey,
-          { method: 'DELETE' },
-          {
-            'Content-Type': 'application/json',
-            Prefer: 'return=minimal',
+        let resp: Response | null = null;
+        let lastErrText = '';
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            resp = await this.requestWithKeyFallback(
+              `${cfg.url}/rest/v1/products?id=in.${encodeURIComponent(`(${inClause})`)}`,
+              cfg.anonKey,
+              { method: 'DELETE' },
+              {
+                'Content-Type': 'application/json',
+                Prefer: 'return=minimal',
+              }
+            );
+            if (resp.ok || (resp.status !== 429 && resp.status < 500)) break;
+            lastErrText = await resp.text();
+          } catch (netErr: any) {
+            lastErrText = netErr?.message || 'Network error during delete';
+            resp = null;
           }
-        );
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+        }
+        if (!resp) {
+          return { ok: false, error: lastErrText || 'Cloud delete failed' };
+        }
         if (!resp.ok) {
-          const errText = await resp.text();
+          const errText = lastErrText || (await resp.text());
           return { ok: false, error: `Rollback delete error (${resp.status}): ${errText.slice(0, 120)}` };
         }
       }

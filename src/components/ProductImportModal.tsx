@@ -20,6 +20,7 @@ import {
   parseAndValidateImportText,
 } from '../utils/importMapper';
 import { convertExcelBufferToCsv, toStandardAmanmartCsv } from '../utils/excelToCsv';
+import { normalizeBarcodeLookup, normalizeLooseSku } from '../utils/barcodeUtils';
 
 interface ProductImportModalProps {
   isOpen: boolean;
@@ -36,20 +37,21 @@ interface ProductImportModalProps {
   ) => Promise<ImportTransactionResult | void> | ImportTransactionResult | void;
 }
 
-// Parse HTML / XML table (when user uploads an .xls file saved as HTML/XML table from Excel)
+// Parse HTML table (when user uploads an .xls file saved as HTML table from Excel)
+// SpreadsheetML XML (<Workbook>/<Row>) is delegated to SheetJS so sparse ss:Index columns remain intact.
 const extractTextFromHtmlOrXmlSpreadsheet = (content: string): string | null => {
-  if (!content.includes('<table') && !content.includes('<Row') && !content.includes('<tr')) {
+  if (!content.includes('<table') && !content.includes('<tr')) {
     return null;
   }
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(content, 'text/html');
-    const rows = Array.from(doc.querySelectorAll('tr, Row'));
+    const rows = Array.from(doc.querySelectorAll('tr'));
     if (rows.length === 0) return null;
 
     const csvLines: string[] = [];
     rows.forEach((tr) => {
-      const cells = Array.from(tr.querySelectorAll('td, th, Cell, Data'));
+      const cells = Array.from(tr.querySelectorAll('td, th'));
       if (cells.length > 0) {
         const vals = cells.map((c) => (c.textContent || '').replace(/\r?\n/g, ' ').trim());
         if (vals.some((v) => v.length > 0)) {
@@ -297,19 +299,15 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
   const existingLookup = useMemo(() => {
     const skuMap = new Map<string, Product>();
     const nameMap = new Map<string, Product>();
+    const barcodeMap = new Map<string, Product>();
     const barcodeSet = new Set<string>();
-
-    const normalizeLooseSku = (sku: string): string => {
-      const cleaned = sku.trim().toLowerCase();
-      return /^\d+$/.test(cleaned) ? cleaned.replace(/^0+(?=\d)/, '') : cleaned;
-    };
 
     if (!replaceAllLocal) {
       existingProducts.forEach((p) => {
         if (p.sku) {
           const skuLower = p.sku.trim().toLowerCase();
           if (skuLower) {
-            skuMap.set(skuLower, p);
+            if (!skuMap.has(skuLower)) skuMap.set(skuLower, p);
             const normSku = normalizeLooseSku(skuLower);
             if (normSku && !skuMap.has(normSku)) {
               skuMap.set(normSku, p);
@@ -319,19 +317,56 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
         if (p.name) {
           const nameLower = p.name.trim().toLowerCase();
           if (nameLower) {
-            nameMap.set(nameLower, p);
+            if (!nameMap.has(nameLower)) nameMap.set(nameLower, p);
             const collapsed = nameLower.replace(/\s+/g, ' ');
             if (collapsed && !nameMap.has(collapsed)) {
               nameMap.set(collapsed, p);
             }
           }
         }
-        if (p.barcode) barcodeSet.add(p.barcode.trim().toLowerCase());
+        if (p.barcode) {
+          const bcLower = p.barcode.trim().toLowerCase();
+          if (bcLower) {
+            barcodeSet.add(bcLower);
+            if (!barcodeMap.has(bcLower)) barcodeMap.set(bcLower, p);
+          }
+          const normBc = normalizeBarcodeLookup(p.barcode);
+          if (normBc) {
+            barcodeSet.add(normBc);
+            if (!barcodeMap.has(normBc)) barcodeMap.set(normBc, p);
+          }
+        }
       });
     }
 
-    return { skuMap, nameMap, barcodeSet };
+    return { skuMap, nameMap, barcodeMap, barcodeSet };
   }, [existingProducts, replaceAllLocal]);
+
+  const findExistingMatch = (rec: ImportProductRecord): boolean => {
+    const skuLower = rec.sku ? rec.sku.trim().toLowerCase() : '';
+    const skuNorm = skuLower ? normalizeLooseSku(skuLower) : '';
+    if (skuLower) {
+      if (existingLookup.skuMap.has(skuLower) || existingLookup.skuMap.has(skuNorm)) {
+        return true;
+      }
+    }
+    const bcLower = rec.barcode ? rec.barcode.trim().toLowerCase() : '';
+    const bcNorm = rec.barcode ? normalizeBarcodeLookup(rec.barcode) : '';
+    const bcCandidate =
+      rec.barcodeProvided !== false && bcLower
+        ? existingLookup.barcodeMap.get(bcLower) || existingLookup.barcodeMap.get(bcNorm)
+        : undefined;
+    const nameCollapsed = rec.name.trim().toLowerCase().replace(/\s+/g, ' ');
+    const nameCandidate = existingLookup.nameMap.get(nameCollapsed);
+
+    if (skuLower) {
+      return Boolean(
+        (bcCandidate && !bcCandidate.sku?.trim()) ||
+        (nameCandidate && !nameCandidate.sku?.trim())
+      );
+    }
+    return Boolean(bcCandidate || nameCandidate);
+  };
 
   // Parse raw text via flexible Dynamics 365 & standard CSV/Excel column mapper + validation
   const parseResult = useMemo(() => {
@@ -352,18 +387,7 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     let newItems = 0;
 
     parsedRecords.forEach((rec) => {
-      const skuLower = rec.sku ? rec.sku.trim().toLowerCase() : '';
-      const skuNorm =
-        skuLower && /^\d+$/.test(skuLower) ? skuLower.replace(/^0+(?=\d)/, '') : skuLower;
-      const nameLower = rec.name.trim().toLowerCase();
-      const nameCollapsed = nameLower.replace(/\s+/g, ' ');
-      const exists =
-        (rec.barcode && existingLookup.barcodeSet.has(rec.barcode.trim().toLowerCase())) ||
-        (skuLower && existingLookup.skuMap.has(skuLower)) ||
-        (skuNorm && existingLookup.skuMap.has(skuNorm)) ||
-        existingLookup.nameMap.has(nameLower) ||
-        existingLookup.nameMap.has(nameCollapsed);
-      if (exists) existingMatches++;
+      if (findExistingMatch(rec)) existingMatches++;
       else newItems++;
     });
 
@@ -507,7 +531,7 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     }
   };
 
-  // Load the bundled 10,112-item Amanmart master CSV directly
+  // Pull latest catalog from Supabase directly (repairs legacy 13-digit UPC-A codes & removes local demo items)
   const handleLoadBundledMasterCsv = async () => {
     setIsLoadingMaster(true);
     setFileError(null);
@@ -515,15 +539,14 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     setImportResult(null);
     setConvertedCsvInfo(null);
     try {
-      const resp = await fetch('/ITEMLISTMASTER_cleaned.csv');
-      if (!resp.ok) throw new Error('File ITEMLISTMASTER_cleaned.csv tidak ditemukan');
-      const text = await resp.text();
-      setFileName('ITEMLISTMASTER_cleaned.csv (10.112 Item Master Amanmart)');
-      setReplaceAllLocal(true);
-      setRawText(text);
-      audioService.playScanBeep();
+      const res = await storageService.pullAllFromSupabase();
+      if (!res.ok) {
+        throw new Error(res.error || 'Gagal menarik data dari Supabase');
+      }
+      audioService.playPrintCompleteChime();
+      onClose();
     } catch (err: any) {
-      setFileError(err?.message || 'Gagal memuat file master');
+      setFileError(err?.message || 'Gagal menyinkronkan dari Supabase');
     } finally {
       setIsLoadingMaster(false);
     }
@@ -716,15 +739,15 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-6 overflow-y-auto space-y-5 flex-1 text-slate-800">
-          {/* Quick 1-Click Load 10,112 Master Items Banner */}
+          {/* Direct Supabase Sync & Excel Authoritative Import Banner */}
           <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                File Master Excel Anda (10.112 Item) Siap Dimuat!
+                Database Utama Supabase Aktif (Tanpa Data Dummy Lokal)
               </div>
               <p className="text-[11px] text-emerald-800 mt-0.5">
-                Format <code className="bg-emerald-100 px-1 rounded font-mono">SKU,Item Name,Barcode,Price,Category,Stock</code> sudah terverifikasi bebas error &amp; siap menggantikan data lokal lama.
+                Unggah file Excel (<code className="bg-emerald-100 px-1 rounded font-mono">.xlsx / .xls / .csv</code>) di bawah untuk langsung menimpa &amp; memperbarui harga, stok (<code className="bg-emerald-100 px-1 rounded font-mono">Inv On Hand</code>), dan barcode (<code className="bg-emerald-100 px-1 rounded font-mono">Barcode 0</code>) ke Supabase.
               </p>
             </div>
             <button
@@ -733,8 +756,8 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
               disabled={isLoadingMaster}
               className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition shrink-0 flex items-center gap-1.5"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5" />
-              {isLoadingMaster ? 'Memuat 10.112 Item...' : 'Muat 10.112 Item Master'}
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMaster ? 'animate-spin' : ''}`} />
+              {isLoadingMaster ? 'Menarik dari Supabase...' : 'Tarik Data Supabase'}
             </button>
           </div>
 
@@ -1065,17 +1088,14 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
                     <tr>
                       <th className="py-2 px-3">Status</th>
                       <th className="py-2 px-3">Item Name &amp; SKU</th>
-                      <th className="py-2 px-3 font-mono">Barcode (EAN-13)</th>
+                      <th className="py-2 px-3 font-mono">Barcode</th>
                       <th className="py-2 px-3 text-right">Unit Price</th>
                       <th className="py-2 px-3 text-right font-mono">Allocated Stock</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {parsedRecords.slice(0, 25).map((r, idx) => {
-                      const isMatch =
-                        (r.barcode && existingLookup.barcodeSet.has(r.barcode.toLowerCase())) ||
-                        (r.sku && existingLookup.skuMap.has(r.sku.toLowerCase())) ||
-                        existingLookup.nameMap.has(r.name.toLowerCase());
+                      const isMatch = findExistingMatch(r);
 
                       return (
                         <tr key={idx} className="hover:bg-slate-50/80">

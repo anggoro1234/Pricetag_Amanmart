@@ -1,4 +1,5 @@
 import { ImportProductRecord, Product } from '../types';
+import { hasActualBarcode, normalizeLooseSku } from './barcodeUtils';
 
 export type DynamicsPriceTierOption = 'auto' | 'harga_jual_0' | 'harga_jual_1' | 'harga_jual_2';
 
@@ -460,14 +461,15 @@ export const resolveImportColumnMap = (
   const compacted = normalized.map(compactHeader);
 
   const exactMatch = (aliases: string[]): number => {
-    const compactAliases = new Set(aliases.map((a) => a.replace(/[^a-z0-9]/g, '')));
-    for (let i = 0; i < compacted.length; i++) {
-      if (compactAliases.has(compacted[i])) return i;
+    for (const alias of aliases) {
+      const compactAlias = alias.replace(/[^a-z0-9]/g, '');
+      const idx = compacted.indexOf(compactAlias);
+      if (idx >= 0) return idx;
     }
     return -1;
   };
 
-  // Dynamics 365 & standard explicit matches
+  // Dynamics 365 & standard explicit matches (ordered by priority)
   let skuIdx = exactMatch([
     'itemcode',
     'itemno',
@@ -476,17 +478,20 @@ export const resolveImportColumnMap = (
     'plu',
     'kodebarang',
     'kodeitem',
-    'no',
+    'noitem',
+    'nobarang',
   ]);
   let barcodeIdx = exactMatch([
     'barcode0',
     'barcode',
-    'ean',
     'ean13',
+    'ean',
     'upc',
     'gtin',
     'kodebarcode',
     'barcodeno',
+    'barcodepcs',
+    'mainbarcode',
   ]);
   let nameIdx = exactMatch([
     'description',
@@ -589,7 +594,11 @@ export const resolveImportColumnMap = (
     if (
       barcodeIdx < 0 &&
       (comp.includes('barcode') || comp.includes('ean') || comp.includes('upc') || comp.includes('gtin')) &&
-      !comp.includes('type')
+      !comp.includes('type') &&
+      !comp.includes('crt') &&
+      !comp.includes('besar') &&
+      !comp.includes('karton') &&
+      !comp.includes('box')
     ) {
       barcodeIdx = idx;
       return;
@@ -637,6 +646,14 @@ export const resolveImportColumnMap = (
       !col.includes('bulk') &&
       !col.includes('crt') &&
       !col.includes('karton') &&
+      !col.includes('beli') &&
+      !col.includes('pokok') &&
+      !col.includes('modal') &&
+      !col.includes('purchase') &&
+      !col.includes('buy') &&
+      !col.includes('hpp') &&
+      !col.includes('discount') &&
+      !col.includes('diskon') &&
       !comp.includes('hargajual1') &&
       !comp.includes('hargajual2')
     ) {
@@ -1015,29 +1032,23 @@ export const parseAndValidateImportText = (
     const department =
       deptParts.length > 0 ? deptParts.join(' / ').toUpperCase() : `${category} / General`;
 
+    const skuMatch =
+      sku && existingLookup
+        ? existingLookup.skuMap.get(sku.toLowerCase()) ||
+          existingLookup.skuMap.get(normalizeLooseSku(sku))
+        : undefined;
+    const nameMatchCandidate = existingLookup ? existingLookup.nameMap.get(name.toLowerCase()) : undefined;
     const existingMatch =
-      (sku && existingLookup ? existingLookup.skuMap.get(sku.toLowerCase()) : undefined) ||
-      (existingLookup ? existingLookup.nameMap.get(name.toLowerCase()) : undefined);
+      skuMatch ||
+      (!sku || !nameMatchCandidate?.sku ? nameMatchCandidate : undefined);
 
-    const cleanedInputBc = rawBarcode
-      .replace(/^=+/, '')
-      .replace(/^['"]+|['"]+$/g, '')
-      .replace(/\s+/g, '');
-
-    const isInputCorruptedOrEmpty =
-      !cleanedInputBc ||
-      cleanedInputBc === '-' ||
-      /^0+$/.test(cleanedInputBc) ||
-      cleanedInputBc.length < 5 ||
-      /[a-df-zA-DF-Z]/.test(cleanedInputBc) ||
-      /e\+/i.test(cleanedInputBc) ||
-      (/^[0-9]{11,14}$/.test(cleanedInputBc) && /0{6,}$/.test(cleanedInputBc));
+    const barcodeProvided = hasActualBarcode(rawBarcode);
 
     let finalBarcode = '';
-    if (isInputCorruptedOrEmpty) {
+    if (!barcodeProvided) {
       repairedBarcodes++;
-      if (existingMatch && existingMatch.barcode.length >= 8) {
-        finalBarcode = existingMatch.barcode;
+      if (existingMatch && hasActualBarcode(existingMatch.barcode)) {
+        finalBarcode = options.sanitizeBarcode(existingMatch.barcode, sku || name);
       } else {
         finalBarcode = options.sanitizeBarcode(rawBarcode, sku || name);
       }
@@ -1058,6 +1069,7 @@ export const parseAndValidateImportText = (
     const candidate: ImportProductRecord = {
       name,
       barcode: finalBarcode,
+      barcodeProvided,
       price,
       priceProvided,
       sku,
@@ -1081,7 +1093,7 @@ export const parseAndValidateImportText = (
     // Deduplicate within the imported file so batch upserts never encounter duplicate keys
     const dedupeKey = sku
       ? `sku:${sku.toLowerCase()}`
-      : !isInputCorruptedOrEmpty && finalBarcode
+      : barcodeProvided && finalBarcode
         ? `bc:${finalBarcode.toLowerCase()}`
         : `name:${name.toLowerCase()}`;
 
@@ -1097,11 +1109,12 @@ export const parseAndValidateImportText = (
         ...candidate,
         price: candidate.priceProvided === false && prev.price > 0 ? prev.price : candidate.price,
         priceProvided: candidate.priceProvided || prev.priceProvided,
-        // Preserve non-empty optional attributes if latest duplicate left them blank
+        // Overwrite barcode when latest duplicate supplies an actual barcode; otherwise keep previous actual barcode
         barcode:
-          isInputCorruptedOrEmpty && prev.barcode && prev.barcode.length >= 8
+          !candidate.barcodeProvided && prev.barcode && hasActualBarcode(prev.barcode)
             ? prev.barcode
             : candidate.barcode,
+        barcodeProvided: candidate.barcodeProvided || prev.barcodeProvided,
         category: candidate.category || prev.category,
         department: candidate.department || prev.department,
         brand: candidate.brand || prev.brand,

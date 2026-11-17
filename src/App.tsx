@@ -248,24 +248,19 @@ export default function App() {
     storageService.setSimulatedOffline(!isSimulatedOffline);
   };
 
-  // Quick print pair matching attached example
+  // Quick print pair helper (safe when catalog is empty)
   const handlePrintAttachedPair = () => {
-    setBatchQueue([
-      {
-        id: `pair-1-${Date.now()}`,
-        product: attachedExample1,
+    const pairItems = [attachedExample1, attachedExample2].filter((p): p is Product => Boolean(p));
+    if (pairItems.length === 0) return;
+    setBatchQueue(
+      pairItems.map((prod, idx) => ({
+        id: `pair-${idx + 1}-${Date.now()}`,
+        product: prod,
         quantity: 1,
         templateId: 'tmpl-supermarket',
         storeId: activeStore.id,
-      },
-      {
-        id: `pair-2-${Date.now()}`,
-        product: attachedExample2,
-        quantity: 1,
-        templateId: 'tmpl-supermarket',
-        storeId: activeStore.id,
-      },
-    ]);
+      }))
+    );
     setActiveTemplateId('tmpl-supermarket');
     setBatchPrintOpen(true);
     audioService.playPrintCompleteChime();
@@ -623,8 +618,8 @@ export default function App() {
           stores={stores}
           activeStoreId={activeStore.id}
           existingProducts={products}
-          onImportComplete={(imported, targetStoreId, updateExisting, replaceAllLocal, onProgress) => {
-            return storageService.importProductsTransactional(
+          onImportComplete={async (imported, targetStoreId, updateExisting, replaceAllLocal, onProgress) => {
+            const res = await storageService.importProductsTransactional(
               imported,
               targetStoreId,
               updateExisting,
@@ -632,6 +627,23 @@ export default function App() {
               true,
               onProgress
             );
+            if (res.ok && res.products) {
+              const byId = new Map<string, Product>();
+              const bySku = new Map<string, Product>();
+              res.products.forEach((p) => {
+                byId.set(p.id, p);
+                if (p.sku) bySku.set(p.sku.trim().toLowerCase(), p);
+              });
+              setBatchQueue((prev) =>
+                prev.map((item) => {
+                  const fresh =
+                    byId.get(item.product.id) ||
+                    (item.product.sku ? bySku.get(item.product.sku.trim().toLowerCase()) : undefined);
+                  return fresh ? { ...item, product: fresh } : item;
+                })
+              );
+            }
+            return res;
           }}
         />
       )}

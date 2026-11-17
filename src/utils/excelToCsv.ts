@@ -55,9 +55,24 @@ const formatCellLossless = (cell: any, XLSX: any): string => {
     }
 
     if (!isFinite(cell.v)) return '';
+
+    // Preserve explicit zero-padded barcode/SKU number formats (e.g. "000000000000" -> "089686010015")
+    const fmtClean = fmt.replace(/["'\\@_\s]/g, '').trim();
+    if (Number.isInteger(cell.v) && cell.v >= 0 && /^0{5,20}$/.test(fmtClean)) {
+      return String(cell.v).padStart(fmtClean.length, '0');
+    }
+
+    // Preserve formatted leading zeros from cell.w only if it represents the exact same integer
+    if (typeof cell.w === 'string') {
+      const wTrim = cell.w.trim();
+      if (/^0+[0-9]+$/.test(wTrim) && Number(wTrim) === cell.v) {
+        return wTrim;
+      }
+    }
+
     // Preserve full 13-digit EAN/barcode digits & exact prices/stocks instead of Excel narrow E+12 display text
     if (Math.abs(cell.v) < 1e20) {
-      return String(cell.v);
+      return Number.isInteger(cell.v) ? String(cell.v) : String(Number(cell.v.toPrecision(15)));
     }
     return String(cell.w ?? cell.v);
   }
@@ -173,7 +188,7 @@ export const convertExcelBufferToCsv = async (
     const workbook = XLSX.read(new Uint8Array(buffer), {
       type: 'array',
       cellNF: true,
-      cellText: false,
+      cellText: true,
       cellDates: false,
     });
 

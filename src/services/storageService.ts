@@ -12,9 +12,20 @@ import {
   ImportProductRecord,
   ImportTransactionResult
 } from '../types';
-import { INITIAL_PRODUCTS, INITIAL_STORES, INITIAL_TEMPLATES, INITIAL_USERS } from '../data/initialData';
+import { INITIAL_STORES, INITIAL_TEMPLATES, INITIAL_USERS } from '../data/initialData';
 import { audioService } from './audioService';
 import { idbGetProducts, idbSaveProducts, idbClearProducts, supabaseService } from './supabaseService';
+import {
+  detectBarcodeType,
+  generateValidEan13,
+  hasActualBarcode,
+  normalizeBarcodeLookup,
+  normalizeLooseSku,
+  sanitizeBarcodeValue,
+} from '../utils/barcodeUtils';
+import { parseAndValidateImportText } from '../utils/importMapper';
+
+export { generateValidEan13, sanitizeBarcodeValue, detectBarcodeType };
 
 const STORAGE_KEYS = {
   PRODUCTS: 'aman_label_products_v1',
@@ -29,103 +40,6 @@ const STORAGE_KEYS = {
   ALERTS: 'aman_label_alerts_v1',
   OFFLINE_QUEUE: 'aman_label_offline_queue_v1',
   SIMULATED_OFFLINE: 'aman_label_simulated_offline_v1',
-};
-
-// Generate a valid 13-digit EAN-13 barcode (deterministic if seed such as SKU/name is given)
-export const generateValidEan13 = (seed?: string): string => {
-  let digits9 = '';
-  if (seed && seed.trim().length > 0) {
-    const cleanNum = seed.replace(/[^0-9]/g, '');
-    if (cleanNum.length >= 4 && cleanNum.length <= 9) {
-      digits9 = cleanNum.padStart(9, '0');
-    } else {
-      // Hash string deterministically into 9 digits
-      let hash = 2166136261;
-      for (let i = 0; i < seed.length; i++) {
-        hash ^= seed.charCodeAt(i);
-        hash = Math.imul(hash, 16777619);
-      }
-      digits9 = (Math.abs(hash) % 900000000 + 100000000).toString().slice(0, 9);
-    }
-  } else {
-    digits9 = Math.floor(100000000 + Math.random() * 900000000).toString();
-  }
-
-  const raw12 = ('899' + digits9).slice(0, 12);
-  let sum = 0;
-  for (let i = 0; i < 12; i++) {
-    const n = parseInt(raw12[i], 10) || 0;
-    sum += i % 2 === 0 ? n : n * 3;
-  }
-  const check = (10 - (sum % 10)) % 10;
-  return raw12 + check.toString();
-};
-
-// Ensure an EAN-13 barcode has a valid check digit, or clean/repair corrupted barcodes
-export const sanitizeBarcodeValue = (rawBarcode?: string, fallbackSeed?: string): string => {
-  if (!rawBarcode) return generateValidEan13(fallbackSeed);
-
-  let clean = rawBarcode
-    .trim()
-    .replace(/^=+/, '')
-    .replace(/^['"]+|['"]+$/g, '')
-    .replace(/\s+/g, '');
-
-  // Treat empty, dashes, '0', '00000', 'nan', or text strings with letters (e.g. "BANTEXDISPLAYBOOK") as needing EAN-13 generation
-  if (
-    !clean ||
-    clean === '-' ||
-    /^0+$/.test(clean) ||
-    clean.toLowerCase() === 'nan' ||
-    /[a-df-zA-DF-Z]/.test(clean)
-  ) {
-    return generateValidEan13(fallbackSeed);
-  }
-
-  // Handle scientific notation with dot or comma e.g. 8.99E+12 or 8,99E+12 or 9E+12
-  if (/^[0-9]+([.,][0-9]+)?e\+[0-9]+$/i.test(clean)) {
-    const num = Number(clean.replace(',', '.'));
-    if (!isNaN(num) && isFinite(num)) {
-      clean = num.toFixed(0);
-    }
-  }
-
-  // Detect corrupted barcodes:
-  // 1. Short numeric fragments (< 5 digits, e.g. "658", "843", "000" from split decimal stock)
-  // 2. Scientific notation precision loss (12-13 digits ending in 6 or more zeros e.g. 8990000000000 or 9000000000000)
-  // 3. Contains semicolons or any non-numeric characters
-  const isShortFragment = clean.length < 5;
-  const isSciNotationPrecisionLoss = /^[0-9]{11,14}$/.test(clean) && /0{6,}$/.test(clean);
-  const hasNonDigits = /[^0-9]/.test(clean);
-
-  if (isShortFragment || isSciNotationPrecisionLoss || hasNonDigits) {
-    return generateValidEan13(fallbackSeed);
-  }
-
-  // If 12 numeric digits, compute the 13th EAN-13 check digit
-  if (/^[0-9]{12}$/.test(clean)) {
-    let sum = 0;
-    for (let i = 0; i < 12; i++) {
-      const n = parseInt(clean[i], 10);
-      sum += i % 2 === 0 ? n : n * 3;
-    }
-    const check = (10 - (sum % 10)) % 10;
-    return clean + check.toString();
-  }
-
-  // If 13 numeric digits, fix the last check digit if invalid so JsBarcode EAN13 never fails
-  if (/^[0-9]{13}$/.test(clean)) {
-    const raw12 = clean.slice(0, 12);
-    let sum = 0;
-    for (let i = 0; i < 12; i++) {
-      const n = parseInt(raw12[i], 10);
-      sum += i % 2 === 0 ? n : n * 3;
-    }
-    const check = (10 - (sum % 10)) % 10;
-    return raw12 + check.toString();
-  }
-
-  return clean;
 };
 
 // Normalize category names so "FRESH" and "Fresh" don't create duplicate categories
@@ -226,6 +140,150 @@ class StorageService {
     }
   }
 
+  // Clean, repair (including 0896860100468 -> 089686010046), normalize canonical SKU IDs, and deduplicate catalog
+  private normalizeAndDeduplicateCatalog(rawProducts: Product[]): {
+    products: Product[];
+    repairedProducts: Product[];
+    obsoleteIds: string[];
+  } {
+    const products: Product[] = [];
+    const repairedById = new Map<string, Product>();
+    const obsoleteIdSet = new Set<string>();
+    const skuToIdx = new Map<string, { index: number; wasCanonicalId: boolean }>();
+
+    for (const rawProd of rawProducts) {
+      if (!rawProd) continue;
+      // Drop legacy local dummy prototype items
+      if (
+        rawProd.id === 'prod-fresh-1' ||
+        rawProd.sku === '50007' ||
+        (rawProd.name && rawProd.name.includes('BONELESS PAHA FZ/ KG'))
+      ) {
+        if (rawProd.id) obsoleteIdSet.add(rawProd.id);
+        continue;
+      }
+
+      let p: Product = {
+        ...rawProd,
+        pricing: { ...(rawProd.pricing || { unitLabel: 'PCS', unitQuantity: 1, unitPrice: 0 }) },
+        stocks: { ...(rawProd.stocks || {}) },
+      };
+      let changed = false;
+
+      if (p.name && p.name.includes(';')) {
+        const semiParts = p.name.split(';').map((s) => s.trim());
+        if (semiParts.length >= 3) {
+          const extractedName = semiParts[0].replace(/^["']+|["']+$/g, '').trim();
+          const extractedBarcode = semiParts[1] || '';
+          const extractedPrice = parseInt((semiParts[2] || '').replace(/[^0-9]/g, ''), 10);
+          const extractedSku = semiParts[3] || p.sku;
+          const extractedCategory = semiParts[4] ? normalizeCategoryName(semiParts[4]) : p.category;
+          if (extractedName) {
+            p.name = extractedName.toUpperCase();
+            if (extractedSku) p.sku = extractedSku.trim();
+            if (extractedCategory) {
+              p.category = extractedCategory;
+              p.department = `${extractedCategory} / General`;
+            }
+            if (!isNaN(extractedPrice) && extractedPrice >= 0) {
+              p.pricing.unitPrice = extractedPrice;
+              p.pricing.bulkPrice = extractedPrice > 0 ? Math.round(extractedPrice * 22) : 0;
+            }
+            p.barcode = sanitizeBarcodeValue(extractedBarcode, p.sku || p.name);
+            changed = true;
+          }
+        }
+      }
+
+      const cleanSku = (p.sku || '').trim();
+      if (cleanSku !== p.sku) {
+        p.sku = cleanSku;
+        changed = true;
+      }
+
+      const cleanBc = sanitizeBarcodeValue(p.barcode, p.sku || p.name);
+      if (cleanBc !== p.barcode) {
+        p.barcode = cleanBc;
+        changed = true;
+      }
+
+      const detectedType = detectBarcodeType(cleanBc);
+      if (p.barcodeType !== detectedType) {
+        p.barcodeType = detectedType;
+        changed = true;
+      }
+
+      const cleanCat = normalizeCategoryName(p.category);
+      if (cleanCat !== p.category) {
+        p.category = cleanCat;
+        changed = true;
+      }
+
+      INITIAL_STORES.forEach((store) => {
+        if (!p.stocks[store.id]) {
+          const legacyStock = p.stocks['store-1'] || p.stocks['store-2'] || p.stocks['store-3'];
+          p.stocks[store.id] = {
+            storeId: store.id,
+            quantity: Math.max(0, legacyStock?.quantity ?? 35),
+            minThreshold: legacyStock?.minThreshold ?? 20,
+            lastUpdated: new Date().toISOString(),
+          };
+          changed = true;
+        } else if (p.stocks[store.id].quantity < 0 || isNaN(p.stocks[store.id].quantity)) {
+          p.stocks[store.id] = {
+            ...p.stocks[store.id],
+            quantity: Math.max(0, p.stocks[store.id].quantity || 0),
+          };
+          changed = true;
+        }
+      });
+
+      const canonicalId = cleanSku
+        ? `prod-sku-${cleanSku.replace(/[^a-zA-Z0-9_-]/g, '')}`
+        : p.id;
+      const wasCanonicalId = p.id === canonicalId;
+
+      if (cleanSku && p.id && p.id !== canonicalId) {
+        obsoleteIdSet.add(p.id);
+        p.id = canonicalId;
+        changed = true;
+      }
+
+      if (cleanSku) {
+        const skuKey = cleanSku.toLowerCase();
+        const existingEntry = skuToIdx.get(skuKey);
+        if (existingEntry !== undefined) {
+          // Prefer the row that already had the canonical prod-sku-* ID over legacy prod-1..prod-10 rows
+          if (wasCanonicalId && !existingEntry.wasCanonicalId) {
+            products[existingEntry.index] = p;
+            skuToIdx.set(skuKey, { index: existingEntry.index, wasCanonicalId: true });
+            repairedById.set(p.id, p);
+          } else {
+            repairedById.set(products[existingEntry.index].id, products[existingEntry.index]);
+          }
+          continue;
+        }
+        skuToIdx.set(skuKey, { index: products.length, wasCanonicalId });
+      }
+
+      products.push(p);
+      if (changed) {
+        repairedById.set(p.id, p);
+      }
+    }
+
+    // Never delete an ID that is still in the active deduplicated product list
+    for (const prod of products) {
+      obsoleteIdSet.delete(prod.id);
+    }
+
+    return {
+      products,
+      repairedProducts: Array.from(repairedById.values()),
+      obsoleteIds: Array.from(obsoleteIdSet),
+    };
+  }
+
   private initDefaults() {
     if (typeof window === 'undefined') return;
 
@@ -253,143 +311,18 @@ class StorageService {
       localStorage.setItem(STORAGE_KEYS.ACTIVE_STORE, JSON.stringify('store-krg'));
     }
 
-    const isLocalPurged = localStorage.getItem(STORAGE_KEYS.LOCAL_DATA_PURGED) === 'true';
-
     if (!localStorage.getItem(STORAGE_KEYS.PRODUCTS)) {
-      if (isLocalPurged) {
-        this.memoryProducts = [];
-      } else {
-        this.persistProducts([...INITIAL_PRODUCTS]);
-      }
+      this.memoryProducts = [];
     } else {
-      // Ensure existing products have stocks for all 8 branches, repair any corrupted CSV imports, & merge new default products
       try {
         const storedProds: Product[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.PRODUCTS) || '[]');
-        let modified = false;
-        const todayFormatted = new Date().toLocaleDateString('en-GB');
-        const repairedProds: Product[] = [];
-
-        storedProds.forEach((rawProd) => {
-          let p = { ...rawProd };
-          let pModified = false;
-
-          // Auto-repair products corrupted by semicolon CSV split on decimal comma
-          // e.g. name = "BONELESS PAHA FZ/ KG;;56500;50007;FRESH;44" and barcode = "658"
-          if (p.name && p.name.includes(';')) {
-            const semiParts = p.name.split(';').map((s) => s.trim());
-            if (semiParts.length >= 3) {
-              const extractedName = semiParts[0].replace(/^["']+|["']+$/g, '').trim();
-              const extractedBarcode = semiParts[1] || '';
-              const extractedPrice = parseInt((semiParts[2] || '').replace(/[^0-9]/g, ''), 10);
-              const extractedSku = semiParts[3] || p.sku;
-              const extractedCategory = semiParts[4] ? normalizeCategoryName(semiParts[4]) : p.category;
-              const extractedStockRaw = semiParts[5];
-
-              if (extractedName) {
-                p.name = extractedName.toUpperCase();
-                if (extractedSku) p.sku = extractedSku.trim();
-                if (extractedCategory) {
-                  p.category = extractedCategory;
-                  p.department = `${extractedCategory} / General`;
-                }
-                if (!isNaN(extractedPrice) && extractedPrice >= 0) {
-                  p.pricing = {
-                    ...p.pricing,
-                    unitPrice: extractedPrice,
-                    bulkPrice: extractedPrice > 0 ? Math.round(extractedPrice * 22) : 0,
-                  };
-                }
-                p.barcode = sanitizeBarcodeValue(extractedBarcode, p.sku || p.name);
-
-                if (extractedStockRaw !== undefined && extractedStockRaw !== '') {
-                  const parsedStock = Math.max(0, Math.round(parseFloat(extractedStockRaw.replace(',', '.')) || 0));
-                  const currentStocks = { ...(p.stocks || {}) };
-                  const activeStoreId = 'store-krg';
-                  currentStocks[activeStoreId] = {
-                    storeId: activeStoreId,
-                    quantity: parsedStock,
-                    minThreshold: currentStocks[activeStoreId]?.minThreshold ?? 20,
-                    lastUpdated: new Date().toISOString(),
-                  };
-                  p.stocks = currentStocks;
-                }
-                pModified = true;
-              }
-            }
-          }
-
-          // Ensure barcode is clean and valid (fixes short fragments like "658" or "8.99E+12" / "9000000000000")
-          const cleanBc = sanitizeBarcodeValue(p.barcode, p.sku || p.name);
-          if (cleanBc !== p.barcode) {
-            p.barcode = cleanBc;
-            pModified = true;
-          }
-
-          // Normalize category name (e.g., "FRESH" -> "Fresh")
-          const cleanCat = normalizeCategoryName(p.category);
-          if (cleanCat !== p.category) {
-            p.category = cleanCat;
-            pModified = true;
-          }
-
-          const currentStocks = { ...(p.stocks || {}) };
-          INITIAL_STORES.forEach((store) => {
-            if (!currentStocks[store.id]) {
-              pModified = true;
-              const legacyStock = currentStocks['store-1'] || currentStocks['store-2'] || currentStocks['store-3'];
-              currentStocks[store.id] = {
-                storeId: store.id,
-                quantity: Math.max(0, legacyStock?.quantity ?? 35),
-                minThreshold: legacyStock?.minThreshold ?? 20,
-                lastUpdated: new Date().toISOString(),
-              };
-            } else if (currentStocks[store.id].quantity < 0 || isNaN(currentStocks[store.id].quantity)) {
-              currentStocks[store.id] = {
-                ...currentStocks[store.id],
-                quantity: Math.max(0, currentStocks[store.id].quantity || 0),
-              };
-              pModified = true;
-            }
-          });
-
-          if (p.dateEffective !== todayFormatted) {
-            pModified = true;
-          }
-
-          if (pModified) {
-            modified = true;
-            p = { ...p, stocks: currentStocks, dateEffective: todayFormatted };
-          }
-
-          // Deduplicate if repaired SKU/name already exists in repairedProds
-          const dupIdx = repairedProds.findIndex(
-            (existing) =>
-              (p.sku && existing.sku.toLowerCase() === p.sku.toLowerCase()) ||
-              (p.barcode && existing.barcode.toLowerCase() === p.barcode.toLowerCase())
-          );
-          if (dupIdx === -1) {
-            repairedProds.push(p);
-          } else {
-            modified = true;
-          }
-        });
-
-        // Only merge default demo products if the user has NOT purged local demo data
-        if (!isLocalPurged) {
-          INITIAL_PRODUCTS.forEach((initProd) => {
-            const exists = repairedProds.some(
-              (p) => p.id === initProd.id || p.sku === initProd.sku || p.barcode === initProd.barcode
-            );
-            if (!exists) {
-              repairedProds.push(initProd);
-              modified = true;
-            }
-          });
+        const normalized = this.normalizeAndDeduplicateCatalog(storedProds);
+        this.memoryProducts = normalized.products;
+        if (normalized.repairedProducts.length > 0 || normalized.obsoleteIds.length > 0) {
+          this.writeLocalProductsFallback(normalized.products);
         }
-
-        this.memoryProducts = repairedProds;
       } catch {
-        this.memoryProducts = isLocalPurged ? [] : [...INITIAL_PRODUCTS];
+        this.memoryProducts = [];
       }
     }
 
@@ -397,15 +330,17 @@ class StorageService {
     idbGetProducts()
       .then((idbProds) => {
         if (idbProds && idbProds.length > 0) {
-          // If IndexedDB has more items (e.g. 10,000 items vs 250 localStorage snapshot), use IndexedDB as source of truth
-          if (idbProds.length >= (this.memoryProducts?.length || 0)) {
-            this.memoryProducts = idbProds;
+          const normalizedIdb = this.normalizeAndDeduplicateCatalog(idbProds);
+          if (normalizedIdb.products.length >= (this.memoryProducts?.length || 0)) {
+            this.memoryProducts = normalizedIdb.products;
+            if (normalizedIdb.repairedProducts.length > 0 || normalizedIdb.obsoleteIds.length > 0) {
+              this.persistProducts(normalizedIdb.products);
+            }
             this.notifyListeners();
-          } else if (this.memoryProducts && this.memoryProducts.length > idbProds.length) {
+          } else if (this.memoryProducts && this.memoryProducts.length > normalizedIdb.products.length) {
             idbSaveProducts(this.memoryProducts).catch(() => {});
           }
         } else if (this.memoryProducts && this.memoryProducts.length > 0) {
-          // Seed IndexedDB if it was empty
           idbSaveProducts(this.memoryProducts).catch(() => {});
         }
       })
@@ -544,20 +479,18 @@ class StorageService {
     if (this.memoryProducts !== null) {
       return this.memoryProducts;
     }
-    const isLocalPurged =
-      typeof window !== 'undefined' &&
-      localStorage.getItem(STORAGE_KEYS.LOCAL_DATA_PURGED) === 'true';
     try {
       const data = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
       if (data) {
         const parsed = JSON.parse(data);
-        this.memoryProducts = Array.isArray(parsed) ? parsed : [];
+        const normalized = this.normalizeAndDeduplicateCatalog(Array.isArray(parsed) ? parsed : []);
+        this.memoryProducts = normalized.products;
         return this.memoryProducts;
       }
-      this.memoryProducts = isLocalPurged ? [] : [...INITIAL_PRODUCTS];
+      this.memoryProducts = [];
       return this.memoryProducts;
     } catch {
-      this.memoryProducts = isLocalPurged ? [] : [...INITIAL_PRODUCTS];
+      this.memoryProducts = [];
       return this.memoryProducts;
     }
   }
@@ -618,12 +551,13 @@ class StorageService {
     }
 
     for (const candidate of candidates) {
-      const exactMatch = products.find(
-        (p) =>
-          p.barcode.trim().toLowerCase() === candidate ||
-          p.sku.trim().toLowerCase() === candidate
-      );
-      if (exactMatch) return exactMatch;
+      const exactBarcodeMatch = products.find((p) => p.barcode.trim().toLowerCase() === candidate);
+      if (exactBarcodeMatch) return exactBarcodeMatch;
+    }
+
+    for (const candidate of candidates) {
+      const exactSkuMatch = products.find((p) => p.sku.trim().toLowerCase() === candidate);
+      if (exactSkuMatch) return exactSkuMatch;
     }
 
     // 2. Fallback for UPC-A / EAN-13 leading-zero differences between laptop & Android PDA scanners
@@ -631,15 +565,17 @@ class StorageService {
       if (/^\d{6,}$/.test(candidate)) {
         const strippedClean = candidate.replace(/^0+/, '');
         if (strippedClean.length >= 6) {
-          const match = products.find((p) => {
+          const bcMatch = products.find((p) => {
             const b = p.barcode.trim().toLowerCase();
-            if (/^\d{6,}$/.test(b) && b.replace(/^0+/, '') === strippedClean) {
-              return true;
-            }
+            return /^\d{6,}$/.test(b) && b.replace(/^0+/, '') === strippedClean;
+          });
+          if (bcMatch) return bcMatch;
+
+          const skuMatch = products.find((p) => {
             const s = p.sku.trim().toLowerCase();
             return /^\d{6,}$/.test(s) && s.replace(/^0+/, '') === strippedClean;
           });
-          if (match) return match;
+          if (skuMatch) return skuMatch;
         }
       }
     }
@@ -1016,6 +952,7 @@ class StorageService {
     duplicatesMerged: number;
     finalProducts: Product[];
     touchedProducts: Product[];
+    removedIds: string[];
   } {
     const existingProducts = replaceAllLocal
       ? []
@@ -1029,25 +966,44 @@ class StorageService {
     // Build O(1) hash maps so importing 10,000+ rows executes in < 100ms without freezing browser
     const skuMap = new Map<string, Product>();
     const skuNormalizedMap = new Map<string, Product>();
+    const skuAllMatchesMap = new Map<string, Product[]>();
     const barcodeMap = new Map<string, Product>();
+    const barcodeNormalizedMap = new Map<string, Product>();
     const nameMap = new Map<string, Product>();
-
-    const normalizeLooseSku = (val: string): string => {
-      const cleaned = val.trim().toLowerCase();
-      return /^[0-9]+$/.test(cleaned) ? cleaned.replace(/^0+(?=[0-9])/, '') : cleaned;
-    };
 
     existingProducts.forEach((p) => {
       if (p.sku) {
-        skuMap.set(p.sku.trim().toLowerCase(), p);
-        skuNormalizedMap.set(normalizeLooseSku(p.sku), p);
+        const skuLower = p.sku.trim().toLowerCase();
+        if (skuLower) {
+          const list = skuAllMatchesMap.get(skuLower);
+          if (list) {
+            list.push(p);
+          } else {
+            skuAllMatchesMap.set(skuLower, [p]);
+            skuMap.set(skuLower, p);
+          }
+          const normSku = normalizeLooseSku(p.sku);
+          if (normSku && !skuNormalizedMap.has(normSku)) {
+            skuNormalizedMap.set(normSku, p);
+          }
+        }
       }
-      if (p.barcode) barcodeMap.set(p.barcode.trim().toLowerCase(), p);
-      if (p.name) nameMap.set(p.name.replace(/\s+/g, ' ').trim().toLowerCase(), p);
+      if (p.barcode) {
+        const bcLower = p.barcode.trim().toLowerCase();
+        if (bcLower && !barcodeMap.has(bcLower)) barcodeMap.set(bcLower, p);
+        const normBc = normalizeBarcodeLookup(p.barcode);
+        if (normBc && !barcodeNormalizedMap.has(normBc)) barcodeNormalizedMap.set(normBc, p);
+      }
+      if (p.name) {
+        const normName = p.name.replace(/\s+/g, ' ').trim().toLowerCase();
+        if (normName && !nameMap.has(normName)) nameMap.set(normName, p);
+      }
     });
 
     const newProductsToPrepend: Product[] = [];
     const touchedById = new Map<string, Product>();
+    const removedProductsSet = new Set<Product>();
+    const removedIdSet = new Set<string>();
     const batchSeenKeys = new Set<string>();
     const nowIso = new Date().toISOString();
     const todayFormatted = new Date().toLocaleDateString('en-GB');
@@ -1099,7 +1055,10 @@ class StorageService {
         rawStock !== undefined && !isNaN(rawStock) && isFinite(rawStock)
           ? Math.max(0, Math.round(rawStock))
           : undefined;
-      const preliminaryBarcode = rawBarcode ? sanitizeBarcodeValue(rawBarcode, rawSku || cleanName) : '';
+      const barcodeProvided = rec.barcodeProvided ?? hasActualBarcode(rawBarcode);
+      const preliminaryBarcode =
+        barcodeProvided && rawBarcode ? sanitizeBarcodeValue(rawBarcode, rawSku || cleanName) : '';
+      const normalizedNameKey = cleanName.replace(/\s+/g, ' ').trim().toLowerCase();
 
       const batchKey = rawSku
         ? `sku:${rawSku.toLowerCase()}`
@@ -1113,34 +1072,106 @@ class StorageService {
       }
       batchSeenKeys.add(batchKey);
 
-      // O(1) lookup by SKU (exact or numeric leading-zero-normalized), Barcode, or normalized Name
-      const matchedProd =
-        (rawSku
-          ? skuMap.get(rawSku.trim().toLowerCase()) || skuNormalizedMap.get(normalizeLooseSku(rawSku))
-          : undefined) ||
-        (preliminaryBarcode ? barcodeMap.get(preliminaryBarcode.toLowerCase()) : undefined) ||
-        nameMap.get(cleanName.replace(/\s+/g, ' ').trim().toLowerCase());
+      // O(1) lookup: match by SKU first; only fall back to barcode/name if SKU is empty or target lacks an SKU
+      let matchedProd: Product | undefined;
+      if (rawSku) {
+        matchedProd =
+          skuMap.get(rawSku.trim().toLowerCase()) ||
+          skuNormalizedMap.get(normalizeLooseSku(rawSku));
+        if (!matchedProd) {
+          const bcCandidate = preliminaryBarcode
+            ? barcodeMap.get(preliminaryBarcode.toLowerCase()) ||
+              barcodeNormalizedMap.get(normalizeBarcodeLookup(preliminaryBarcode))
+            : undefined;
+          const nameCandidate = nameMap.get(normalizedNameKey);
+          if (bcCandidate && !bcCandidate.sku?.trim()) {
+            matchedProd = bcCandidate;
+          } else if (nameCandidate && !nameCandidate.sku?.trim()) {
+            matchedProd = nameCandidate;
+          }
+        }
+      } else {
+        matchedProd =
+          (preliminaryBarcode
+            ? barcodeMap.get(preliminaryBarcode.toLowerCase()) ||
+              barcodeNormalizedMap.get(normalizeBarcodeLookup(preliminaryBarcode))
+            : undefined) || nameMap.get(normalizedNameKey);
+      }
 
       if (matchedProd) {
         if (updateExisting || isIntraFileDuplicate) {
           matchedProd.name = cleanName.toUpperCase();
+          nameMap.set(normalizedNameKey, matchedProd);
+
           if (rawSku) {
+            const skuLower = rawSku.trim().toLowerCase();
+            const canonicalId = `prod-sku-${rawSku.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+            // Prune any ghost duplicates in catalog sharing the exact same SKU
+            const sameSkuList = skuAllMatchesMap.get(skuLower);
+            if (sameSkuList && sameSkuList.length > 1) {
+              for (const dup of sameSkuList) {
+                if (dup !== matchedProd) {
+                  removedProductsSet.add(dup);
+                  if (dup.id && dup.id !== canonicalId) {
+                    removedIdSet.add(dup.id);
+                  }
+                  touchedById.delete(dup.id);
+                }
+              }
+              skuAllMatchesMap.set(skuLower, [matchedProd]);
+            }
             matchedProd.sku = rawSku;
-            skuMap.set(rawSku.trim().toLowerCase(), matchedProd);
+            if (matchedProd.id !== canonicalId) {
+              removedIdSet.add(matchedProd.id);
+              touchedById.delete(matchedProd.id);
+              matchedProd.id = canonicalId;
+            }
+            skuMap.set(skuLower, matchedProd);
             skuNormalizedMap.set(normalizeLooseSku(rawSku), matchedProd);
           }
-          if (rawBarcode && rawBarcode.length >= 5 && !rawBarcode.toUpperCase().includes('E+')) {
-            matchedProd.barcode = sanitizeBarcodeValue(rawBarcode, matchedProd.sku || cleanName);
-            barcodeMap.set(matchedProd.barcode.toLowerCase(), matchedProd);
-          } else if (!matchedProd.barcode || matchedProd.barcode.length < 5) {
+
+          // Excel / item list is the primary source of truth: overwrite barcode verbatim when provided
+          if (barcodeProvided && hasActualBarcode(rawBarcode)) {
+            const cleanedImportBarcode = sanitizeBarcodeValue(rawBarcode, matchedProd.sku || cleanName);
+            const newBarcodeKey = cleanedImportBarcode.toLowerCase();
+            const newNormBarcodeKey = normalizeBarcodeLookup(cleanedImportBarcode);
+            const existingBarcode = (matchedProd.barcode || '').toLowerCase();
+            const existingNormBarcode = normalizeBarcodeLookup(matchedProd.barcode || '');
+
+            if (
+              existingBarcode &&
+              existingBarcode !== newBarcodeKey &&
+              barcodeMap.get(existingBarcode) === matchedProd
+            ) {
+              barcodeMap.delete(existingBarcode);
+            }
+            if (
+              existingNormBarcode &&
+              existingNormBarcode !== newNormBarcodeKey &&
+              barcodeNormalizedMap.get(existingNormBarcode) === matchedProd
+            ) {
+              barcodeNormalizedMap.delete(existingNormBarcode);
+            }
+
+            matchedProd.barcode = cleanedImportBarcode;
+            matchedProd.barcodeType = detectBarcodeType(cleanedImportBarcode);
+            barcodeMap.set(newBarcodeKey, matchedProd);
+            if (newNormBarcodeKey) barcodeNormalizedMap.set(newNormBarcodeKey, matchedProd);
+          } else if (!hasActualBarcode(matchedProd.barcode)) {
             matchedProd.barcode = sanitizeBarcodeValue(matchedProd.barcode, matchedProd.sku || cleanName);
+            matchedProd.barcodeType = detectBarcodeType(matchedProd.barcode);
             barcodeMap.set(matchedProd.barcode.toLowerCase(), matchedProd);
+            const normBc = normalizeBarcodeLookup(matchedProd.barcode);
+            if (normBc) barcodeNormalizedMap.set(normBc, matchedProd);
+          } else {
+            matchedProd.barcodeType = detectBarcodeType(matchedProd.barcode);
           }
+
           // Overwrite old/un-updated prices; only preserve existing non-zero price if the new cell was completely blank
           if (unitPrice > 0 || rec.priceProvided !== false || matchedProd.pricing.unitPrice === 0) {
             matchedProd.pricing.unitPrice = unitPrice;
-            if (!rec.bulkPrice && unitPrice > 0) {
-              matchedProd.pricing.bulkPrice = Math.round(unitPrice * 22);
+            if (!rec.bulkPrice) {
+              matchedProd.pricing.bulkPrice = unitPrice > 0 ? Math.round(unitPrice * 22) : 0;
             }
           }
           if (rec.bulkPrice !== undefined && rec.bulkPrice > 0) {
@@ -1158,7 +1189,7 @@ class StorageService {
           }
           if (rec.brand) matchedProd.brand = rec.brand;
           if (rec.supplier) matchedProd.supplier = rec.supplier;
-          if (rec.dateEffective) matchedProd.dateEffective = rec.dateEffective;
+          matchedProd.dateEffective = rec.dateEffective || todayFormatted;
           if (rec.unitLabel) matchedProd.pricing.unitLabel = rec.unitLabel.toUpperCase();
 
           if (safeStock !== undefined) {
@@ -1208,7 +1239,7 @@ class StorageService {
           id: deterministicId,
           sku: newSku,
           barcode: cleanBarcode,
-          barcodeType: 'EAN13',
+          barcodeType: detectBarcodeType(cleanBarcode),
           name: cleanName.toUpperCase(),
           category: normalizedCat,
           brand: rec.brand || rec.supplier || 'General',
@@ -1235,15 +1266,26 @@ class StorageService {
 
         newProductsToPrepend.push(newProd);
         touchedById.set(newProd.id, newProd);
-        skuMap.set(newSku.toLowerCase(), newProd);
+        const skuLower = newSku.toLowerCase();
+        skuMap.set(skuLower, newProd);
         skuNormalizedMap.set(normalizeLooseSku(newSku), newProd);
+        skuAllMatchesMap.set(skuLower, [newProd]);
         barcodeMap.set(cleanBarcode.toLowerCase(), newProd);
-        nameMap.set(newProd.name.replace(/\s+/g, ' ').trim().toLowerCase(), newProd);
+        const normBc = normalizeBarcodeLookup(cleanBarcode);
+        if (normBc) barcodeNormalizedMap.set(normBc, newProd);
+        nameMap.set(normalizedNameKey, newProd);
         added++;
       }
     });
 
-    const finalProducts = [...newProductsToPrepend, ...existingProducts];
+    const filteredExisting =
+      removedProductsSet.size > 0
+        ? existingProducts.filter((p) => !removedProductsSet.has(p))
+        : existingProducts;
+    const finalProducts = [...newProductsToPrepend, ...filteredExisting];
+    for (const prod of finalProducts) {
+      removedIdSet.delete(prod.id);
+    }
     return {
       added,
       updated,
@@ -1251,6 +1293,7 @@ class StorageService {
       duplicatesMerged,
       finalProducts,
       touchedProducts: Array.from(touchedById.values()),
+      removedIds: Array.from(removedIdSet),
     };
   }
 
@@ -1280,7 +1323,24 @@ class StorageService {
 
     // Sync imported/updated items to Supabase in background if configured and enabled
     if (syncToCloud && this.isOnline() && supabaseService.isConfigured() && prepared.touchedProducts.length > 0) {
-      supabaseService.upsertProductsBatch(prepared.touchedProducts).catch(() => {});
+      supabaseService
+        .upsertProductsBatch(prepared.touchedProducts)
+        .then(async (res) => {
+          if (res.ok && prepared.removedIds.length > 0) {
+            await supabaseService.deleteProductsByIds(prepared.removedIds);
+          }
+          if (res.ok && replaceAllLocal) {
+            const remoteIds = await supabaseService.fetchAllProductIds();
+            if (remoteIds) {
+              const keepSet = new Set(prepared.finalProducts.map((p) => p.id));
+              const staleIds = remoteIds.filter((id) => !keepSet.has(id));
+              if (staleIds.length > 0) {
+                await supabaseService.deleteProductsByIds(staleIds);
+              }
+            }
+          }
+        })
+        .catch(() => {});
     }
 
     this.evaluateStockAlerts();
@@ -1390,49 +1450,41 @@ class StorageService {
         const cloudRes = await supabaseService.upsertProductsBatch(prepared.touchedProducts, onProgress);
 
         if (!cloudRes.ok) {
-          // 1. Roll back local storage & memory state immediately
-          await restoreLocalSnapshot();
-
-          // 2. Compensating rollback on Supabase for any partial chunks committed before failure
-          let cloudRolledBack = true;
-          const syncedIds = cloudRes.syncedIds || [];
-          if (syncedIds.length > 0) {
-            const toRestore: Product[] = [];
-            const toDelete: string[] = [];
-            syncedIds.forEach((id) => {
-              const prev = prevByIdMap.get(id);
-              if (prev) toRestore.push(prev);
-              else toDelete.push(id);
-            });
-
-            if (toRestore.length > 0) {
-              const restoreRes = await supabaseService.upsertProductsBatch(toRestore);
-              if (!restoreRes.ok) cloudRolledBack = false;
-            }
-            if (toDelete.length > 0) {
-              const delRes = await supabaseService.deleteProductsByIds(toDelete);
-              if (!delRes.ok) cloudRolledBack = false;
-            }
-          }
+          // Keep the newly imported Excel data active locally so the user never loses their update
+          // if Supabase experiences a temporary network/batch error.
+          this.evaluateStockAlerts();
+          this.broadcastChange();
 
           return {
-            ok: false,
-            added: 0,
-            updated: 0,
+            ok: true,
+            added: prepared.added,
+            updated: prepared.updated,
             skipped: prepared.skipped,
             duplicatesMerged: prepared.duplicatesMerged,
-            cloudSynced: 0,
+            cloudSynced: cloudRes.synced || 0,
             cloudAttempted: true,
-            rolledBack: true,
-            cloudRolledBack,
-            error:
-              cloudRes.error ||
-              'Sinkronisasi Supabase gagal saat transaksi import. Perubahan dibatalkan & dikembalikan ke kondisi sebelumnya.',
-            products: prevProductsSnapshot,
+            rolledBack: false,
+            error: cloudRes.error,
+            products: prepared.finalProducts,
           };
         }
 
         cloudSynced = cloudRes.synced;
+
+        // Clean up duplicate SKU rows and, when replacing the entire catalog, any obsolete remote IDs
+        const idsToDelete = new Set<string>(prepared.removedIds);
+        if (replaceAllLocal) {
+          const remoteIds = await supabaseService.fetchAllProductIds();
+          if (remoteIds) {
+            const keepSet = new Set(prepared.finalProducts.map((p) => p.id));
+            for (const rid of remoteIds) {
+              if (!keepSet.has(rid)) idsToDelete.add(rid);
+            }
+          }
+        }
+        if (idsToDelete.size > 0) {
+          await supabaseService.deleteProductsByIds(Array.from(idsToDelete));
+        }
       }
 
       this.evaluateStockAlerts();
@@ -1478,63 +1530,32 @@ class StorageService {
       throw new Error('File master CSV (/ITEMLISTMASTER_cleaned.csv) tidak ditemukan.');
     }
     const text = await resp.text();
-    const lines = text
-      .replace(/^\uFEFF/, '')
-      .split(/\r?\n/)
-      .filter((l) => l.trim().length > 0);
-    const records: ImportProductRecord[] = [];
+    const parsed = parseAndValidateImportText(text, {
+      skipBlocked: false,
+      sanitizeBarcode: sanitizeBarcodeValue,
+      normalizeCategory: normalizeCategoryName,
+    });
 
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i];
-      const cols: string[] = [];
-      let cur = '';
-      let inQuotes = false;
-      for (let cIdx = 0; cIdx < line.length; cIdx++) {
-        const ch = line[cIdx];
-        if (ch === '"') {
-          if (inQuotes && line[cIdx + 1] === '"') {
-            cur += '"';
-            cIdx++;
-          } else {
-            inQuotes = !inQuotes;
-          }
-        } else if (ch === ',' && !inQuotes) {
-          cols.push(cur.trim());
-          cur = '';
-        } else {
-          cur += ch;
-        }
-      }
-      cols.push(cur.trim());
-
-      const sku = (cols[0] || '').trim();
-      const rawName = (cols[1] || '').trim().replace(/^["']+|["']+$/g, '');
-      const name = (rawName || (sku ? `ITEM SKU ${sku}` : '')).toUpperCase();
-      if (!name) continue;
-
-      const rawBarcode = (cols[2] || '').trim();
-      const priceNum = parseFloat((cols[3] || '0').replace(/,/g, ''));
-      const price = isNaN(priceNum) || priceNum < 0 ? 0 : Math.round(priceNum);
-      const category = normalizeCategoryName(cols[4]);
-      const stockNum = parseFloat((cols[5] || '0').replace(/,/g, ''));
-      const stock = isNaN(stockNum) ? 0 : Math.max(0, Math.round(stockNum));
-
-      records.push({
-        sku: sku || undefined,
-        name,
-        barcode: sanitizeBarcodeValue(rawBarcode, sku || name),
-        price,
-        category,
-        stock,
-      });
-    }
-
-    if (records.length === 0) {
+    if (parsed.records.length === 0) {
       throw new Error('Master CSV tidak berisi baris produk yang valid.');
     }
 
-    this.importProducts(records, targetStoreId, true, true, syncToCloud);
-    return { count: records.length };
+    if (syncToCloud) {
+      const txRes = await this.importProductsTransactional(
+        parsed.records,
+        targetStoreId,
+        true,
+        true,
+        true
+      );
+      if (!txRes.ok) {
+        throw new Error(txRes.error || 'Gagal menyinkronkan Master CSV ke Supabase.');
+      }
+      return { count: parsed.records.length };
+    }
+
+    this.importProducts(parsed.records, targetStoreId, true, true, false);
+    return { count: parsed.records.length };
   }
 
   // --- Supabase Cloud Sync Helpers ---
@@ -1574,9 +1595,22 @@ class StorageService {
         localStorage.setItem(STORAGE_KEYS.LOCAL_DATA_PURGED, 'true');
       } catch {}
     }
-    this.persistProducts(res.products);
+
+    const normalized = this.normalizeAndDeduplicateCatalog(res.products);
+    this.persistProducts(normalized.products);
     this.broadcastChange();
-    return { ok: true, count: res.products.length };
+
+    // Automatically heal any legacy corrupted UPC-A barcodes or duplicate legacy IDs in Supabase in the background
+    if (this.isOnline()) {
+      if (normalized.repairedProducts.length > 0) {
+        supabaseService.upsertProductsBatch(normalized.repairedProducts).catch(() => {});
+      }
+      if (normalized.obsoleteIds.length > 0) {
+        supabaseService.deleteProductsByIds(normalized.obsoleteIds).catch(() => {});
+      }
+    }
+
+    return { ok: true, count: normalized.products.length };
   }
 
   // --- Templates ---

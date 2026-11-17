@@ -38,6 +38,7 @@ export interface ProductStock {
 export interface ImportProductRecord {
   name: string;
   barcode: string;
+  barcodeProvided?: boolean;
   price: number;
   priceProvided?: boolean;
   sku?: string;
@@ -63,7 +64,7 @@ export interface Product {
   id: string;
   sku: string; // e.g. "1001040"
   barcode: string; // e.g. "089686010015"
-  barcodeType: 'EAN13' | 'CODE128' | 'UPCA' | 'QR';
+  barcodeType: 'EAN13' | 'CODE128' | 'UPCA' | 'EAN8' | 'QR';
   name: string; // e.g. "INDOMIE AYAM BAWANG BAG 69GR"
   category: string;
   brand: string;
