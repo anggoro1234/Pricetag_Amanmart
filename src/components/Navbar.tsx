@@ -1,12 +1,10 @@
 import React from 'react';
 import { 
   Printer, 
-  Barcode as BarcodeIcon, 
   Layers, 
   Bell, 
   Building2, 
   WifiOff, 
-  Cloud, 
   LayoutTemplate
 } from 'lucide-react';
 import { StoreLocation, User, ThermalPrinterSettings } from '../types';
@@ -22,13 +20,13 @@ interface NavbarProps {
   onToggleOffline: () => void;
   batchQueueCount: number;
   unreadAlertsCount: number;
-  onOpenScanner: () => void;
+  onOpenScanner?: () => void;
   onOpenBatchPrint: () => void;
   onOpenPrinterSettings: () => void;
   onOpenTemplateEditor: () => void;
   onOpenNotifications: () => void;
   onOpenAuth: () => void;
-  onOpenDeployGuide: () => void;
+  onOpenDeployGuide?: () => void;
   printerSettings: ThermalPrinterSettings;
 }
 
@@ -42,13 +40,11 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleOffline,
   batchQueueCount,
   unreadAlertsCount,
-  onOpenScanner,
   onOpenBatchPrint,
   onOpenPrinterSettings,
   onOpenTemplateEditor,
   onOpenNotifications,
   onOpenAuth,
-  onOpenDeployGuide,
 }) => {
   return (
     <header className="bg-[#0b3520] text-white border-b border-emerald-800/40 sticky top-0 z-40 shadow-md">
@@ -114,16 +110,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </button>
 
-          {/* Barcode Scanner Button */}
-          <button
-            onClick={onOpenScanner}
-            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-xs transition active:scale-95"
-            title="Open Camera / Hardware Scanner"
-          >
-            <BarcodeIcon className="w-4 h-4 shrink-0" />
-            <span className="hidden sm:inline whitespace-nowrap">Scan Barcode</span>
-          </button>
-
           {/* Batch Print Queue Button */}
           <button
             onClick={onOpenBatchPrint}
@@ -168,16 +154,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                 {unreadAlertsCount}
               </span>
             )}
-          </button>
-
-          {/* Supabase Database & Cloud Deploy Guide */}
-          <button
-            onClick={onOpenDeployGuide}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-200 transition border border-emerald-800/60 text-xs font-bold"
-            title="Integrasi Database Supabase (10.000+ Item) & Cloud Deployment"
-          >
-            <Cloud className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span className="hidden lg:inline whitespace-nowrap">Supabase DB</span>
           </button>
 
           {/* User Profile / RBAC Switcher */}
