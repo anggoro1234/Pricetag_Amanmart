@@ -999,10 +999,10 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
                       onChange={(e) => setPriceTier(e.target.value as DynamicsPriceTierOption)}
                       className="px-2 py-1 rounded-lg border border-blue-200 bg-white text-[11px] font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     >
-                      <option value="auto">Auto (Harga Jual 0 → 1 → 2)</option>
-                      <option value="harga_jual_0">Harga Jual 0 (Retail PCS)</option>
-                      <option value="harga_jual_1">Harga Jual 1 (Tier 1)</option>
-                      <option value="harga_jual_2">Harga Jual 2 (Wholesale)</option>
+                      <option value="auto">Auto (Harga Jual 2 PCS → 1 → 0)</option>
+                      <option value="harga_jual_2">Harga Jual 2 (PCS / Satuan Kecil)</option>
+                      <option value="harga_jual_1">Harga Jual 1 (Satuan Sedang)</option>
+                      <option value="harga_jual_0">Harga Jual 0 (CRT / Satuan Besar)</option>
                     </select>
                   </label>
 

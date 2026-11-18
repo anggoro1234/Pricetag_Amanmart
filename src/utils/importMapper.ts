@@ -887,6 +887,7 @@ export const parseAndValidateImportText = (
   let invalidPriceCells = 0;
   let negativeStockClamped = 0;
   let repairedBarcodes = 0;
+  let pcsPriceFallbackCount = 0;
   const duplicateSamples: string[] = [];
   const skippedSamples: string[] = [];
 
@@ -983,19 +984,22 @@ export const parseAndValidateImportText = (
         chosenPriceValid = parsed0.isValid;
         priceProvided = parsed0.hasValue;
       } else {
-        // 'auto': prefer Harga Jual 0 (retail PCS), gracefully fall back to Harga Jual 1 / 2 when 0 is unset
-        if (parsed0.value > 0) {
-          price = parsed0.value;
-          chosenPriceValid = parsed0.isValid;
-          priceProvided = parsed0.hasValue;
+        // 'auto': Harga Jual 2 = harga per PCS (Satuan Kecil), Harga Jual 1 = Satuan Sedang, Harga Jual 0 = per CRT (Satuan Besar).
+        // Prefer Harga Jual 2 (PCS); only fall back to Harga Jual 1 / 0 when the PCS price is empty or 0.
+        if (parsed2 && parsed2.value > 0) {
+          price = parsed2.value;
+          chosenPriceValid = parsed2.isValid;
+          priceProvided = parsed2.hasValue;
         } else if (parsed1 && parsed1.value > 0) {
           price = parsed1.value;
           chosenPriceValid = parsed1.isValid;
           priceProvided = parsed1.hasValue;
-        } else if (parsed2 && parsed2.value > 0) {
-          price = parsed2.value;
-          chosenPriceValid = parsed2.isValid;
-          priceProvided = parsed2.hasValue;
+          if (colMap.hargaJual2Idx >= 0) pcsPriceFallbackCount++;
+        } else if (parsed0.value > 0) {
+          price = parsed0.value;
+          chosenPriceValid = parsed0.isValid;
+          priceProvided = parsed0.hasValue;
+          if (colMap.hargaJual2Idx >= 0 || colMap.hargaJual1Idx >= 0) pcsPriceFallbackCount++;
         } else {
           price = parsed0.value;
           chosenPriceValid = parsed0.isValid;
@@ -1008,15 +1012,16 @@ export const parseAndValidateImportText = (
       invalidPriceCells++;
     }
 
-    // Resolve Bulk Price: explicit Bulk column first, otherwise highest higher Dynamics selling tier (> retail price)
+    // Resolve Bulk Price: explicit Bulk column first, otherwise Harga Jual 0 (CRT / Satuan Besar),
+    // then Harga Jual 1 (Satuan Sedang) — only when it is higher than the chosen PCS price
     let bulkPrice: number | undefined;
     if (colMap.bulkPriceIdx >= 0) {
       const bp = parseFlexiblePrice(getCol(cols, colMap.bulkPriceIdx));
       if (bp.value > 0) bulkPrice = bp.value;
-    } else if (colMap.hargaJual2Idx >= 0 || colMap.hargaJual1Idx >= 0) {
-      const tier2Val = parsed2?.value ?? 0;
+    } else if (colMap.hargaJual0Idx >= 0 || colMap.hargaJual1Idx >= 0) {
+      const tier0Val = colMap.hargaJual0Idx >= 0 ? parsed0.value : 0;
       const tier1Val = parsed1?.value ?? 0;
-      if (tier2Val > price) bulkPrice = tier2Val;
+      if (tier0Val > price) bulkPrice = tier0Val;
       else if (tier1Val > price) bulkPrice = tier1Val;
     }
 
@@ -1150,6 +1155,11 @@ export const parseAndValidateImportText = (
   }
   if (zeroPriceCount > 0) {
     warnings.push(`${zeroPriceCount} produk memiliki harga Rp 0 — periksa kembali kolom Harga Jual.`);
+  }
+  if (pcsPriceFallbackCount > 0) {
+    warnings.push(
+      `${pcsPriceFallbackCount} produk tidak memiliki Harga Jual 2 (PCS), sehingga memakai Harga Jual 1 / 0 sebagai cadangan — periksa kembali harganya.`
+    );
   }
   if (negativeStockClamped > 0) {
     warnings.push(`${negativeStockClamped} nilai stok negatif disesuaikan aman menjadi 0.`);
