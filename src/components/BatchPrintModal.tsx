@@ -235,7 +235,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-lg font-bold text-white">Bulk Batch Printing</h2>
+                <h2 className="text-lg font-bold text-white">Printing Multi</h2>
                 <span className="bg-red-500/20 text-red-400 text-xs px-2.5 py-0.5 rounded-full font-bold border border-red-500/30">
                   {totalLabels} Labels ({queue.length} Products)
                 </span>
@@ -423,13 +423,13 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
 
               {/* Search Input */}
               <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <Search className="w-3.5 h-3.5 text-orange-600 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
                   placeholder="Cari Indomie, Kecap, Saus, Barcode..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-8 pr-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  className="w-full pl-8 pr-2.5 py-2 bg-orange-50 hover:bg-orange-100/70 focus:bg-white border-2 border-orange-400 rounded-lg text-xs font-medium text-slate-800 placeholder:text-orange-700/70 focus:border-orange-500 focus:ring-2 focus:ring-orange-400/50 focus:outline-none transition shadow-2xs"
                 />
               </div>
             </div>

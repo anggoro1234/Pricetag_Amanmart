@@ -4,7 +4,6 @@ import {
   Printer, 
   Layers, 
   Building2, 
-  BarChart3, 
   Sparkles, 
   ArrowRight, 
   CheckCircle2, 
@@ -34,7 +33,6 @@ import { LabelPreview } from './components/LabelPreview';
 import { Navbar } from './components/Navbar';
 import { ProductCatalog } from './components/ProductCatalog';
 import { StockSyncMatrix } from './components/StockSyncMatrix';
-import { InventoryDashboard } from './components/InventoryDashboard';
 import { BarcodeScannerModal } from './components/BarcodeScannerModal';
 import { BatchPrintModal } from './components/BatchPrintModal';
 import { ThermalPrinterSettingsModal } from './components/ThermalPrinterSettingsModal';
@@ -58,8 +56,8 @@ export default function App() {
   );
   const [activeTemplateId, setActiveTemplateId] = useState<string>('tmpl-supermarket');
 
-  // Navigation tab: 'catalog' | 'sync_matrix' | 'analytics'
-  const [activeTab, setActiveTab] = useState<'catalog' | 'sync_matrix' | 'analytics'>('catalog');
+  // Navigation tab: 'catalog' | 'sync_matrix'
+  const [activeTab, setActiveTab] = useState<'catalog' | 'sync_matrix'>('catalog');
 
   // Offline and sync state
   const [isOnline, setIsOnline] = useState<boolean>(storageService.isOnline());
@@ -340,7 +338,7 @@ export default function App() {
                   </span>
                 </div>
                 <h2 className="text-sm sm:text-base font-bold text-white mt-1">
-                  Thermal Price Label Printing &amp; Multi-Branch Inventory
+                  Thermal Price Label Printing
                 </h2>
                 <p className="text-xs text-emerald-200/80 mt-0.5 max-w-xl">
                   ESC/POS &amp; TSPL thermal printing, real-time stock sync, and unified barcode scanning.
@@ -395,18 +393,6 @@ export default function App() {
             <Building2 className="w-4 h-4 shrink-0" />
             <span>Multi-Store Real-Time Cloud Sync ({stores.length} Branches)</span>
           </button>
-
-          <button
-            onClick={() => setActiveTab('analytics')}
-            className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm font-bold border-b-2 transition whitespace-nowrap shrink-0 ${
-              activeTab === 'analytics'
-                ? 'border-emerald-700 text-emerald-800 bg-emerald-50/50 rounded-t-lg'
-                : 'border-transparent text-slate-500 hover:text-emerald-800'
-            }`}
-          >
-            <BarChart3 className="w-4 h-4 shrink-0" />
-            <span>Inventory Analytics &amp; Reports</span>
-          </button>
         </div>
 
         {/* Tab 1: Product Catalog & Label Printing */}
@@ -450,17 +436,6 @@ export default function App() {
             activeStore={activeStore}
             userRole={currentUser.role}
             userName={currentUser.name}
-          />
-        )}
-
-        {/* Tab 3: Inventory Dashboard & Analytics */}
-        {activeTab === 'analytics' && (
-          <InventoryDashboard
-            products={products}
-            stores={stores}
-            activeStore={activeStore}
-            onQuickPrint={handleQuickPrint}
-            onAddBatchToQueue={handleAddBatchToQueue}
           />
         )}
       </main>
