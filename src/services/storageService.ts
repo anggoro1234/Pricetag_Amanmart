@@ -10,7 +10,8 @@ import {
   SyncQueueItem,
   ThermalPrinterSettings,
   ImportProductRecord,
-  ImportTransactionResult
+  ImportTransactionResult,
+  PrintQueueItem
 } from '../types';
 import { INITIAL_STORES, INITIAL_TEMPLATES, INITIAL_USERS } from '../data/initialData';
 import { audioService } from './audioService';
@@ -47,7 +48,25 @@ const STORAGE_KEYS = {
   OFFLINE_QUEUE: 'aman_label_offline_queue_v1',
   SIMULATED_OFFLINE: 'aman_label_simulated_offline_v1',
   LAST_CATALOG_SYNC_AT: 'aman_label_last_catalog_sync_at_v1',
+  BATCH_QUEUE: 'aman_label_batch_queue_v1',
+  SCAN_HISTORY: 'aman_label_scan_history_v1',
+  ACTIVE_TEMPLATE: 'aman_label_active_template_v1',
+  UI_SESSION_STATE: 'aman_label_ui_session_state_v1',
 };
+
+export interface PersistedScanHistoryItem {
+  id: string;
+  product: Product;
+  quantity: number;
+  time: string;
+  barcode: string;
+}
+
+export interface PersistedUiSessionState {
+  activeTab: 'catalog' | 'sync_matrix';
+  activeModal: 'none' | 'scanner' | 'batch_print';
+  scannerTab?: 'camera' | 'usb_wedge' | 'manual';
+}
 
 const LEGACY_DEMO_IDS = new Set([
   'prod-1',
@@ -1993,6 +2012,256 @@ class StorageService {
   savePrinterSettings(settings: ThermalPrinterSettings) {
     localStorage.setItem(STORAGE_KEYS.PRINTER_SETTINGS, JSON.stringify(settings));
     this.broadcastChange();
+  }
+
+  // --- Print Queue, Scan Session History & Mode-Switch Persistence ---
+  private buildMinimalProductSnapshot(p: Product): Product {
+    return {
+      id: p.id,
+      sku: p.sku || '',
+      barcode: p.barcode || '',
+      barcodeType: p.barcodeType || 'EAN13',
+      name: p.name || '',
+      category: p.category || 'Grocery',
+      brand: p.brand || 'General',
+      department: p.department || 'Grocery / General',
+      currency: p.currency || 'Rp.',
+      pricing: { ...(p.pricing || { unitLabel: 'PCS', unitQuantity: 1, unitPrice: 0 }) },
+      promotionalDiscount: p.promotionalDiscount ? { ...p.promotionalDiscount } : undefined,
+      stocks: {},
+      dateEffective: p.dateEffective || '',
+      supplier: p.supplier,
+      locationBin: p.locationBin,
+    };
+  }
+
+  getBatchQueue(): PrintQueueItem[] {
+    if (typeof window === 'undefined') return [];
+    const raw = (() => {
+      try {
+        return localStorage.getItem(STORAGE_KEYS.BATCH_QUEUE) || sessionStorage.getItem(STORAGE_KEYS.BATCH_QUEUE);
+      } catch {
+        return null;
+      }
+    })();
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      const catalogProducts = this.getProducts();
+      const byId = new Map<string, Product>();
+      catalogProducts.forEach((p) => {
+        if (p?.id) byId.set(p.id, p);
+      });
+
+      const validItems: PrintQueueItem[] = [];
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        const id = typeof entry.id === 'string' && entry.id ? entry.id : '';
+        const qty = Number(entry.quantity);
+        if (!id || !Number.isFinite(qty) || qty <= 0) continue;
+
+        let resolvedProduct: Product | undefined =
+          entry.product && typeof entry.product === 'object' && entry.product.id
+            ? (byId.get(entry.product.id) || (entry.product as Product))
+            : typeof entry.productId === 'string'
+              ? byId.get(entry.productId)
+              : undefined;
+
+        if (!resolvedProduct) continue;
+        validItems.push({
+          id,
+          product: resolvedProduct,
+          quantity: Math.max(1, Math.round(qty)),
+          templateId: typeof entry.templateId === 'string' ? entry.templateId : 'tmpl-supermarket',
+          storeId: typeof entry.storeId === 'string' ? entry.storeId : this.getActiveStoreId(),
+        });
+      }
+      return validItems;
+    } catch {
+      return [];
+    }
+  }
+
+  saveBatchQueue(queue: PrintQueueItem[]): void {
+    if (typeof window === 'undefined') return;
+    try {
+      if (!queue || queue.length === 0) {
+        localStorage.removeItem(STORAGE_KEYS.BATCH_QUEUE);
+        try {
+          sessionStorage.removeItem(STORAGE_KEYS.BATCH_QUEUE);
+        } catch {}
+        return;
+      }
+      const compactQueue = queue.map((item) => ({
+        id: item.id,
+        product: this.buildMinimalProductSnapshot(item.product),
+        quantity: Math.max(1, Math.round(item.quantity || 1)),
+        templateId: item.templateId,
+        storeId: item.storeId,
+      }));
+      const json = JSON.stringify(compactQueue);
+      try {
+        localStorage.setItem(STORAGE_KEYS.BATCH_QUEUE, json);
+      } catch {
+        // Fallback to ID-only references if localStorage is tight on large 500+ queues
+        const ultraCompact = queue.map((item) => ({
+          id: item.id,
+          productId: item.product.id,
+          quantity: Math.max(1, Math.round(item.quantity || 1)),
+          templateId: item.templateId,
+          storeId: item.storeId,
+        }));
+        const ultraJson = JSON.stringify(ultraCompact);
+        try {
+          localStorage.setItem(STORAGE_KEYS.BATCH_QUEUE, ultraJson);
+        } catch {
+          try {
+            sessionStorage.setItem(STORAGE_KEYS.BATCH_QUEUE, json);
+          } catch {}
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  getScanSessionHistory(): PersistedScanHistoryItem[] {
+    if (typeof window === 'undefined') return [];
+    const raw = (() => {
+      try {
+        return localStorage.getItem(STORAGE_KEYS.SCAN_HISTORY) || sessionStorage.getItem(STORAGE_KEYS.SCAN_HISTORY);
+      } catch {
+        return null;
+      }
+    })();
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      const catalogProducts = this.getProducts();
+      const byId = new Map<string, Product>();
+      catalogProducts.forEach((p) => {
+        if (p?.id) byId.set(p.id, p);
+      });
+
+      const validItems: PersistedScanHistoryItem[] = [];
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        const id = typeof entry.id === 'string' && entry.id ? entry.id : '';
+        const qty = Number(entry.quantity);
+        if (!id || !Number.isFinite(qty) || qty <= 0) continue;
+        const resolvedProduct: Product | undefined =
+          entry.product && typeof entry.product === 'object' && entry.product.id
+            ? (byId.get(entry.product.id) || (entry.product as Product))
+            : typeof entry.productId === 'string'
+              ? byId.get(entry.productId)
+              : undefined;
+        if (!resolvedProduct) continue;
+        validItems.push({
+          id,
+          product: resolvedProduct,
+          quantity: Math.max(1, Math.round(qty)),
+          time: typeof entry.time === 'string' ? entry.time : '',
+          barcode: typeof entry.barcode === 'string' ? entry.barcode : resolvedProduct.barcode || '',
+        });
+      }
+      return validItems;
+    } catch {
+      return [];
+    }
+  }
+
+  saveScanSessionHistory(items: PersistedScanHistoryItem[]): void {
+    if (typeof window === 'undefined') return;
+    try {
+      if (!items || items.length === 0) {
+        localStorage.removeItem(STORAGE_KEYS.SCAN_HISTORY);
+        try {
+          sessionStorage.removeItem(STORAGE_KEYS.SCAN_HISTORY);
+        } catch {}
+        return;
+      }
+      const capped = items.slice(0, 500);
+      const compact = capped.map((item) => ({
+        id: item.id,
+        product: this.buildMinimalProductSnapshot(item.product),
+        quantity: Math.max(1, Math.round(item.quantity || 1)),
+        time: item.time,
+        barcode: item.barcode,
+      }));
+      const json = JSON.stringify(compact);
+      try {
+        localStorage.setItem(STORAGE_KEYS.SCAN_HISTORY, json);
+      } catch {
+        const ultraCompact = capped.map((item) => ({
+          id: item.id,
+          productId: item.product.id,
+          quantity: Math.max(1, Math.round(item.quantity || 1)),
+          time: item.time,
+          barcode: item.barcode,
+        }));
+        try {
+          localStorage.setItem(STORAGE_KEYS.SCAN_HISTORY, JSON.stringify(ultraCompact));
+        } catch {
+          try {
+            sessionStorage.setItem(STORAGE_KEYS.SCAN_HISTORY, json);
+          } catch {}
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  getActiveTemplateId(): string {
+    if (typeof window === 'undefined') return 'tmpl-supermarket';
+    try {
+      return localStorage.getItem(STORAGE_KEYS.ACTIVE_TEMPLATE) || 'tmpl-supermarket';
+    } catch {
+      return 'tmpl-supermarket';
+    }
+  }
+
+  saveActiveTemplateId(templateId: string): void {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_TEMPLATE, templateId);
+    } catch {}
+  }
+
+  getUiSessionState(): PersistedUiSessionState {
+    const fallback: PersistedUiSessionState = { activeTab: 'catalog', activeModal: 'none' };
+    if (typeof window === 'undefined') return fallback;
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEYS.UI_SESSION_STATE);
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw);
+      return {
+        activeTab: parsed?.activeTab === 'sync_matrix' ? 'sync_matrix' : 'catalog',
+        activeModal:
+          parsed?.activeModal === 'scanner' || parsed?.activeModal === 'batch_print'
+            ? parsed.activeModal
+            : 'none',
+        scannerTab:
+          parsed?.scannerTab === 'camera' ||
+          parsed?.scannerTab === 'usb_wedge' ||
+          parsed?.scannerTab === 'manual'
+            ? parsed.scannerTab
+            : undefined,
+      };
+    } catch {
+      return fallback;
+    }
+  }
+
+  saveUiSessionState(partial: Partial<PersistedUiSessionState>): void {
+    if (typeof window === 'undefined') return;
+    try {
+      const current = this.getUiSessionState();
+      const next: PersistedUiSessionState = { ...current, ...partial };
+      sessionStorage.setItem(STORAGE_KEYS.UI_SESSION_STATE, JSON.stringify(next));
+    } catch {}
   }
 }
 

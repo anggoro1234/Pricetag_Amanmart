@@ -54,10 +54,14 @@ export default function App() {
   const [printerSettings, setPrinterSettings] = useState<ThermalPrinterSettings>(
     storageService.getPrinterSettings()
   );
-  const [activeTemplateId, setActiveTemplateId] = useState<string>('tmpl-supermarket');
+  const [activeTemplateId, setActiveTemplateId] = useState<string>(() =>
+    storageService.getActiveTemplateId()
+  );
 
   // Navigation tab: 'catalog' | 'sync_matrix'
-  const [activeTab, setActiveTab] = useState<'catalog' | 'sync_matrix'>('catalog');
+  const [activeTab, setActiveTab] = useState<'catalog' | 'sync_matrix'>(
+    () => storageService.getUiSessionState().activeTab
+  );
 
   // Offline and sync state
   const [isOnline, setIsOnline] = useState<boolean>(storageService.isOnline());
@@ -67,12 +71,18 @@ export default function App() {
   const [offlineQueue, setOfflineQueue] = useState(storageService.getOfflineQueue());
   const [alerts, setAlerts] = useState(storageService.getAlerts());
 
-  // Print queue for bulk batch printing
-  const [batchQueue, setBatchQueue] = useState<PrintQueueItem[]>([]);
+  // Print queue for bulk batch printing (persisted across mobile <-> desktop site reloads)
+  const [batchQueue, setBatchQueue] = useState<PrintQueueItem[]>(() =>
+    storageService.getBatchQueue()
+  );
 
-  // Modals visibility
-  const [scannerOpen, setScannerOpen] = useState<boolean>(false);
-  const [batchPrintOpen, setBatchPrintOpen] = useState<boolean>(false);
+  // Modals visibility (restore active scanner/print modal across mobile <-> desktop site reload)
+  const [scannerOpen, setScannerOpen] = useState<boolean>(
+    () => storageService.getUiSessionState().activeModal === 'scanner'
+  );
+  const [batchPrintOpen, setBatchPrintOpen] = useState<boolean>(
+    () => storageService.getUiSessionState().activeModal === 'batch_print'
+  );
   const [printerSettingsOpen, setPrinterSettingsOpen] = useState<boolean>(false);
   const [templateEditorOpen, setTemplateEditorOpen] = useState<boolean>(false);
   const [notificationsOpen, setNotificationsOpen] = useState<boolean>(false);
@@ -112,6 +122,22 @@ export default function App() {
       window.removeEventListener('offline', handleOnlineStatus);
     };
   }, []);
+
+  // Persist print queue, template & active UI view across mobile/desktop site switch reloads
+  useEffect(() => {
+    storageService.saveBatchQueue(batchQueue);
+  }, [batchQueue]);
+
+  useEffect(() => {
+    storageService.saveActiveTemplateId(activeTemplateId);
+  }, [activeTemplateId]);
+
+  useEffect(() => {
+    storageService.saveUiSessionState({
+      activeTab,
+      activeModal: batchPrintOpen ? 'batch_print' : scannerOpen ? 'scanner' : 'none',
+    });
+  }, [activeTab, scannerOpen, batchPrintOpen]);
 
   const activeStore = stores.find((s) => s.id === activeStoreId) || stores[0];
   const activeTemplate = templates.find((t) => t.id === activeTemplateId) || templates[0];

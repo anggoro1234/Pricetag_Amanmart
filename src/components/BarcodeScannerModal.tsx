@@ -71,9 +71,11 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [isAndroid, setIsAndroid] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? /android/i.test(navigator.userAgent) : false
   );
-  const [activeTab, setActiveTab] = useState<'camera' | 'usb_wedge' | 'manual'>(() =>
-    typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent) ? 'usb_wedge' : 'camera'
-  );
+  const [activeTab, setActiveTab] = useState<'camera' | 'usb_wedge' | 'manual'>(() => {
+    const saved = storageService.getUiSessionState().scannerTab;
+    if (saved) return saved;
+    return typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent) ? 'usb_wedge' : 'camera';
+  });
   const [scannedBarcode, setScannedBarcode] = useState<string>('');
   const [foundProduct, setFoundProduct] = useState<Product | null>(null);
   const [printQty, setPrintQty] = useState<number>(1);
@@ -91,7 +93,9 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [isSyncingCatalog, setIsSyncingCatalog] = useState<boolean>(false);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
   const [autoQueueToBatch, setAutoQueueToBatch] = useState<boolean>(true);
-  const [scanSessionHistory, setScanSessionHistory] = useState<ScanSessionItem[]>([]);
+  const [scanSessionHistory, setScanSessionHistory] = useState<ScanSessionItem[]>(() =>
+    storageService.getScanSessionHistory()
+  );
   const [showAllHistory, setShowAllHistory] = useState<boolean>(false);
 
   const totalBatchItems = batchQueue ? batchQueue.length : scanSessionHistory.length;
@@ -162,7 +166,8 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     if (isOpen) {
       const currentLen = storageService.getProducts().length;
       setCatalogCount(currentLen);
-      if (androidDevice) {
+      const savedTab = storageService.getUiSessionState().scannerTab;
+      if (!savedTab && androidDevice) {
         setActiveTab('usb_wedge');
       }
     } else {
@@ -176,6 +181,17 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       }
     }
   }, [isOpen]);
+
+  // Persist scanner tab & scanned session items across mobile <-> desktop site mode switches
+  useEffect(() => {
+    if (isOpen) {
+      storageService.saveUiSessionState({ scannerTab: activeTab });
+    }
+  }, [isOpen, activeTab]);
+
+  useEffect(() => {
+    storageService.saveScanSessionHistory(scanSessionHistory);
+  }, [scanSessionHistory]);
 
   // Keep PDA capture input focused when Hardware PDA / USB tab is active
   const focusPdaInput = useCallback(() => {
@@ -1194,16 +1210,28 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                     Sesi Scan PDA Ini ({scanSessionHistory.length} Produk • {totalBatchLabels} Label)
                   </h4>
                 </div>
-                {onOpenBatchPrint && (
+                <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={onOpenBatchPrint}
-                    className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 hover:text-emerald-900 underline"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => setScanSessionHistory([])}
+                    className="text-[11px] font-semibold text-slate-400 hover:text-red-600 transition"
+                    title="Bersihkan daftar riwayat scan sesi ini"
                   >
-                    <span>Buka Batch Print Queue</span>
-                    <ArrowRight className="w-3 h-3" />
+                    Hapus Riwayat
                   </button>
-                )}
+                  {onOpenBatchPrint && (
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={onOpenBatchPrint}
+                      className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 hover:text-emerald-900 underline"
+                    >
+                      <span>Buka Batch Print Queue</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="divide-y divide-slate-100 max-h-40 sm:max-h-48 overflow-y-auto overscroll-contain pr-1">
