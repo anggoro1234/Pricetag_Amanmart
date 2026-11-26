@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Barcode as BarcodeIcon, 
   Printer, 
@@ -75,6 +75,10 @@ export default function App() {
   const [batchQueue, setBatchQueue] = useState<PrintQueueItem[]>(() =>
     storageService.getBatchQueue()
   );
+  const batchQueueRef = useRef<PrintQueueItem[]>(batchQueue);
+  const didBatchQueueMountRef = useRef<boolean>(false);
+  const hasBatchQueueMutatedRef = useRef<boolean>(false);
+  batchQueueRef.current = batchQueue;
 
   // Modals visibility (restore active scanner/print modal across mobile <-> desktop site reload)
   const [scannerOpen, setScannerOpen] = useState<boolean>(
@@ -123,8 +127,44 @@ export default function App() {
     };
   }, []);
 
+  // Recover batch queue from IndexedDB if localStorage was constrained or catalog just hydrated
+  useEffect(() => {
+    let active = true;
+    storageService
+      .getBatchQueueAsync()
+      .then((persisted) => {
+        if (!active || hasBatchQueueMutatedRef.current) return;
+        if (persisted.length > batchQueueRef.current.length) {
+          setBatchQueue(persisted);
+        }
+      })
+      .catch(() => {});
+
+    const flushOnPageLeave = () => {
+      if (batchQueueRef.current.length > 0 || hasBatchQueueMutatedRef.current) {
+        storageService.saveBatchQueue(batchQueueRef.current);
+      }
+      storageService.saveUiSessionState({
+        activeTab,
+        activeModal: batchPrintOpen ? 'batch_print' : scannerOpen ? 'scanner' : 'none',
+      });
+    };
+    window.addEventListener('pagehide', flushOnPageLeave);
+    window.addEventListener('beforeunload', flushOnPageLeave);
+    return () => {
+      active = false;
+      window.removeEventListener('pagehide', flushOnPageLeave);
+      window.removeEventListener('beforeunload', flushOnPageLeave);
+    };
+  }, []);
+
   // Persist print queue, template & active UI view across mobile/desktop site switch reloads
   useEffect(() => {
+    if (!didBatchQueueMountRef.current) {
+      didBatchQueueMountRef.current = true;
+      if (batchQueue.length === 0) return;
+    }
+    if (batchQueue.length === 0 && !hasBatchQueueMutatedRef.current) return;
     storageService.saveBatchQueue(batchQueue);
   }, [batchQueue]);
 
@@ -148,6 +188,7 @@ export default function App() {
 
   // Quick single print handler (preserves existing batch items or adds this product)
   const handleQuickPrint = (product: Product) => {
+    hasBatchQueueMutatedRef.current = true;
     setBatchQueue((prev) => {
       const existing = prev.find((item) => item.product.id === product.id);
       if (existing) {
@@ -170,6 +211,7 @@ export default function App() {
 
   // Add to batch queue
   const handleAddToBatch = (product: Product, quantity: number = 1) => {
+    hasBatchQueueMutatedRef.current = true;
     setBatchQueue((prev) => {
       const existing = prev.find((item) => item.product.id === product.id);
       if (existing) {
@@ -194,6 +236,7 @@ export default function App() {
 
   // Batch queue updates
   const handleUpdateBatchQuantity = (id: string, delta: number) => {
+    hasBatchQueueMutatedRef.current = true;
     setBatchQueue((prev) =>
       prev
         .map((item) =>
@@ -204,15 +247,18 @@ export default function App() {
   };
 
   const handleRemoveBatchItem = (id: string) => {
+    hasBatchQueueMutatedRef.current = true;
     setBatchQueue((prev) => prev.filter((item) => item.id !== id));
   };
 
   const handleClearBatchQueue = () => {
+    hasBatchQueueMutatedRef.current = true;
     setBatchQueue([]);
   };
 
   // Delete product and clean up from batch print queue
   const handleDeleteProduct = (productId: string) => {
+    hasBatchQueueMutatedRef.current = true;
     storageService.deleteProduct(productId);
     setBatchQueue((prev) => prev.filter((item) => item.product.id !== productId));
   };
@@ -237,6 +283,7 @@ export default function App() {
 
   // Add multiple items to batch in a single O(N) state update (prevents UI lag on large batches)
   const handleAddBatchToQueue = (items: { product: Product; quantity: number }[]) => {
+    hasBatchQueueMutatedRef.current = true;
     setBatchQueue((prev) => {
       const next = [...prev];
       const idxMap = new Map<string, number>();

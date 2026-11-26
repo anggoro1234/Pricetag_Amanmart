@@ -96,6 +96,10 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [scanSessionHistory, setScanSessionHistory] = useState<ScanSessionItem[]>(() =>
     storageService.getScanSessionHistory()
   );
+  const scanHistoryRef = useRef<ScanSessionItem[]>(scanSessionHistory);
+  const didHistoryMountRef = useRef<boolean>(false);
+  const hasHistoryMutatedRef = useRef<boolean>(false);
+  scanHistoryRef.current = scanSessionHistory;
   const [showAllHistory, setShowAllHistory] = useState<boolean>(false);
 
   const totalBatchItems = batchQueue ? batchQueue.length : scanSessionHistory.length;
@@ -190,6 +194,37 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   }, [isOpen, activeTab]);
 
   useEffect(() => {
+    let active = true;
+    storageService
+      .getScanSessionHistoryAsync()
+      .then((persisted) => {
+        if (!active || hasHistoryMutatedRef.current) return;
+        if (persisted.length > scanHistoryRef.current.length) {
+          setScanSessionHistory(persisted);
+        }
+      })
+      .catch(() => {});
+
+    const flushHistoryOnLeave = () => {
+      if (scanHistoryRef.current.length > 0 || hasHistoryMutatedRef.current) {
+        storageService.saveScanSessionHistory(scanHistoryRef.current);
+      }
+    };
+    window.addEventListener('pagehide', flushHistoryOnLeave);
+    window.addEventListener('beforeunload', flushHistoryOnLeave);
+    return () => {
+      active = false;
+      window.removeEventListener('pagehide', flushHistoryOnLeave);
+      window.removeEventListener('beforeunload', flushHistoryOnLeave);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!didHistoryMountRef.current) {
+      didHistoryMountRef.current = true;
+      if (scanSessionHistory.length === 0) return;
+    }
+    if (scanSessionHistory.length === 0 && !hasHistoryMutatedRef.current) return;
     storageService.saveScanSessionHistory(scanSessionHistory);
   }, [scanSessionHistory]);
 
@@ -470,6 +505,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
       // 2. Simpan & perbarui riwayat produk yang terscan pada interface terminal PDA
       const scanTimeStr = new Date().toLocaleTimeString();
+      hasHistoryMutatedRef.current = true;
       setScanSessionHistory((prev) => {
         const existIdx = prev.findIndex((item) => item.product.id === product.id);
         if (existIdx >= 0) {
@@ -1214,7 +1250,10 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                   <button
                     type="button"
                     onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => setScanSessionHistory([])}
+                    onClick={() => {
+                      hasHistoryMutatedRef.current = true;
+                      setScanSessionHistory([]);
+                    }}
                     className="text-[11px] font-semibold text-slate-400 hover:text-red-600 transition"
                     title="Bersihkan daftar riwayat scan sesi ini"
                   >

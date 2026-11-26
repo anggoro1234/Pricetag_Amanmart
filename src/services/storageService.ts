@@ -19,6 +19,8 @@ import {
   idbGetProducts,
   idbSaveProducts,
   idbClearProducts,
+  idbSaveValue,
+  idbGetValue,
   supabaseService,
   serverCatalogService,
 } from './supabaseService';
@@ -66,7 +68,12 @@ export interface PersistedUiSessionState {
   activeTab: 'catalog' | 'sync_matrix';
   activeModal: 'none' | 'scanner' | 'batch_print';
   scannerTab?: 'camera' | 'usb_wedge' | 'manual';
+  updatedAt?: number;
 }
+
+const IDB_BATCH_QUEUE_KEY = 'batch_queue_v1';
+const IDB_SCAN_HISTORY_KEY = 'scan_history_v1';
+const UI_SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 const LEGACY_DEMO_IDS = new Set([
   'prod-1',
@@ -2015,6 +2022,23 @@ class StorageService {
   }
 
   // --- Print Queue, Scan Session History & Mode-Switch Persistence ---
+  private safeSetLocalStorageWithEviction(key: string, jsonValue: string): boolean {
+    if (typeof window === 'undefined') return false;
+    try {
+      localStorage.setItem(key, jsonValue);
+      return true;
+    } catch {
+      // If localStorage is near quota due to cached 250-item product snapshot (which is safely in IndexedDB), evict that cache and retry
+      try {
+        localStorage.removeItem(STORAGE_KEYS.PRODUCTS);
+        localStorage.setItem(key, jsonValue);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
   private buildMinimalProductSnapshot(p: Product): Product {
     return {
       id: p.id,
@@ -2035,6 +2059,41 @@ class StorageService {
     };
   }
 
+  private hydrateBatchQueueFromArray(parsed: unknown): PrintQueueItem[] {
+    if (!Array.isArray(parsed)) return [];
+    const catalogProducts = this.getProducts();
+    const byId = new Map<string, Product>();
+    catalogProducts.forEach((p) => {
+      if (p?.id) byId.set(p.id, p);
+    });
+
+    const validItems: PrintQueueItem[] = [];
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as Record<string, any>;
+      const id = typeof e.id === 'string' && e.id ? e.id : '';
+      const qty = Number(e.quantity);
+      if (!id || !Number.isFinite(qty) || qty <= 0) continue;
+
+      const resolvedProduct: Product | undefined =
+        e.product && typeof e.product === 'object' && e.product.id
+          ? (byId.get(e.product.id) || (e.product as Product))
+          : typeof e.productId === 'string'
+            ? byId.get(e.productId)
+            : undefined;
+
+      if (!resolvedProduct) continue;
+      validItems.push({
+        id,
+        product: resolvedProduct,
+        quantity: Math.max(1, Math.round(qty)),
+        templateId: typeof e.templateId === 'string' ? e.templateId : 'tmpl-supermarket',
+        storeId: typeof e.storeId === 'string' ? e.storeId : this.getActiveStoreId(),
+      });
+    }
+    return validItems;
+  }
+
   getBatchQueue(): PrintQueueItem[] {
     if (typeof window === 'undefined') return [];
     const raw = (() => {
@@ -2046,51 +2105,32 @@ class StorageService {
     })();
     if (!raw) return [];
     try {
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      const catalogProducts = this.getProducts();
-      const byId = new Map<string, Product>();
-      catalogProducts.forEach((p) => {
-        if (p?.id) byId.set(p.id, p);
-      });
-
-      const validItems: PrintQueueItem[] = [];
-      for (const entry of parsed) {
-        if (!entry || typeof entry !== 'object') continue;
-        const id = typeof entry.id === 'string' && entry.id ? entry.id : '';
-        const qty = Number(entry.quantity);
-        if (!id || !Number.isFinite(qty) || qty <= 0) continue;
-
-        let resolvedProduct: Product | undefined =
-          entry.product && typeof entry.product === 'object' && entry.product.id
-            ? (byId.get(entry.product.id) || (entry.product as Product))
-            : typeof entry.productId === 'string'
-              ? byId.get(entry.productId)
-              : undefined;
-
-        if (!resolvedProduct) continue;
-        validItems.push({
-          id,
-          product: resolvedProduct,
-          quantity: Math.max(1, Math.round(qty)),
-          templateId: typeof entry.templateId === 'string' ? entry.templateId : 'tmpl-supermarket',
-          storeId: typeof entry.storeId === 'string' ? entry.storeId : this.getActiveStoreId(),
-        });
-      }
-      return validItems;
+      return this.hydrateBatchQueueFromArray(JSON.parse(raw));
     } catch {
       return [];
     }
+  }
+
+  async getBatchQueueAsync(): Promise<PrintQueueItem[]> {
+    const idbItems = await idbGetValue<unknown[]>(IDB_BATCH_QUEUE_KEY);
+    if (Array.isArray(idbItems) && idbItems.length > 0) {
+      const hydrated = this.hydrateBatchQueueFromArray(idbItems);
+      if (hydrated.length > 0) return hydrated;
+    }
+    return this.getBatchQueue();
   }
 
   saveBatchQueue(queue: PrintQueueItem[]): void {
     if (typeof window === 'undefined') return;
     try {
       if (!queue || queue.length === 0) {
-        localStorage.removeItem(STORAGE_KEYS.BATCH_QUEUE);
+        try {
+          localStorage.removeItem(STORAGE_KEYS.BATCH_QUEUE);
+        } catch {}
         try {
           sessionStorage.removeItem(STORAGE_KEYS.BATCH_QUEUE);
         } catch {}
+        idbSaveValue(IDB_BATCH_QUEUE_KEY, []).catch(() => {});
         return;
       }
       const compactQueue = queue.map((item) => ({
@@ -2100,11 +2140,10 @@ class StorageService {
         templateId: item.templateId,
         storeId: item.storeId,
       }));
+      idbSaveValue(IDB_BATCH_QUEUE_KEY, compactQueue).catch(() => {});
+
       const json = JSON.stringify(compactQueue);
-      try {
-        localStorage.setItem(STORAGE_KEYS.BATCH_QUEUE, json);
-      } catch {
-        // Fallback to ID-only references if localStorage is tight on large 500+ queues
+      if (!this.safeSetLocalStorageWithEviction(STORAGE_KEYS.BATCH_QUEUE, json)) {
         const ultraCompact = queue.map((item) => ({
           id: item.id,
           productId: item.product.id,
@@ -2112,10 +2151,7 @@ class StorageService {
           templateId: item.templateId,
           storeId: item.storeId,
         }));
-        const ultraJson = JSON.stringify(ultraCompact);
-        try {
-          localStorage.setItem(STORAGE_KEYS.BATCH_QUEUE, ultraJson);
-        } catch {
+        if (!this.safeSetLocalStorageWithEviction(STORAGE_KEYS.BATCH_QUEUE, JSON.stringify(ultraCompact))) {
           try {
             sessionStorage.setItem(STORAGE_KEYS.BATCH_QUEUE, json);
           } catch {}
@@ -2124,6 +2160,39 @@ class StorageService {
     } catch {
       // ignore storage errors
     }
+  }
+
+  private hydrateScanHistoryFromArray(parsed: unknown): PersistedScanHistoryItem[] {
+    if (!Array.isArray(parsed)) return [];
+    const catalogProducts = this.getProducts();
+    const byId = new Map<string, Product>();
+    catalogProducts.forEach((p) => {
+      if (p?.id) byId.set(p.id, p);
+    });
+
+    const validItems: PersistedScanHistoryItem[] = [];
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as Record<string, any>;
+      const id = typeof e.id === 'string' && e.id ? e.id : '';
+      const qty = Number(e.quantity);
+      if (!id || !Number.isFinite(qty) || qty <= 0) continue;
+      const resolvedProduct: Product | undefined =
+        e.product && typeof e.product === 'object' && e.product.id
+          ? (byId.get(e.product.id) || (e.product as Product))
+          : typeof e.productId === 'string'
+            ? byId.get(e.productId)
+            : undefined;
+      if (!resolvedProduct) continue;
+      validItems.push({
+        id,
+        product: resolvedProduct,
+        quantity: Math.max(1, Math.round(qty)),
+        time: typeof e.time === 'string' ? e.time : '',
+        barcode: typeof e.barcode === 'string' ? e.barcode : resolvedProduct.barcode || '',
+      });
+    }
+    return validItems;
   }
 
   getScanSessionHistory(): PersistedScanHistoryItem[] {
@@ -2137,49 +2206,32 @@ class StorageService {
     })();
     if (!raw) return [];
     try {
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      const catalogProducts = this.getProducts();
-      const byId = new Map<string, Product>();
-      catalogProducts.forEach((p) => {
-        if (p?.id) byId.set(p.id, p);
-      });
-
-      const validItems: PersistedScanHistoryItem[] = [];
-      for (const entry of parsed) {
-        if (!entry || typeof entry !== 'object') continue;
-        const id = typeof entry.id === 'string' && entry.id ? entry.id : '';
-        const qty = Number(entry.quantity);
-        if (!id || !Number.isFinite(qty) || qty <= 0) continue;
-        const resolvedProduct: Product | undefined =
-          entry.product && typeof entry.product === 'object' && entry.product.id
-            ? (byId.get(entry.product.id) || (entry.product as Product))
-            : typeof entry.productId === 'string'
-              ? byId.get(entry.productId)
-              : undefined;
-        if (!resolvedProduct) continue;
-        validItems.push({
-          id,
-          product: resolvedProduct,
-          quantity: Math.max(1, Math.round(qty)),
-          time: typeof entry.time === 'string' ? entry.time : '',
-          barcode: typeof entry.barcode === 'string' ? entry.barcode : resolvedProduct.barcode || '',
-        });
-      }
-      return validItems;
+      return this.hydrateScanHistoryFromArray(JSON.parse(raw));
     } catch {
       return [];
     }
+  }
+
+  async getScanSessionHistoryAsync(): Promise<PersistedScanHistoryItem[]> {
+    const idbItems = await idbGetValue<unknown[]>(IDB_SCAN_HISTORY_KEY);
+    if (Array.isArray(idbItems) && idbItems.length > 0) {
+      const hydrated = this.hydrateScanHistoryFromArray(idbItems);
+      if (hydrated.length > 0) return hydrated;
+    }
+    return this.getScanSessionHistory();
   }
 
   saveScanSessionHistory(items: PersistedScanHistoryItem[]): void {
     if (typeof window === 'undefined') return;
     try {
       if (!items || items.length === 0) {
-        localStorage.removeItem(STORAGE_KEYS.SCAN_HISTORY);
+        try {
+          localStorage.removeItem(STORAGE_KEYS.SCAN_HISTORY);
+        } catch {}
         try {
           sessionStorage.removeItem(STORAGE_KEYS.SCAN_HISTORY);
         } catch {}
+        idbSaveValue(IDB_SCAN_HISTORY_KEY, []).catch(() => {});
         return;
       }
       const capped = items.slice(0, 500);
@@ -2190,10 +2242,10 @@ class StorageService {
         time: item.time,
         barcode: item.barcode,
       }));
+      idbSaveValue(IDB_SCAN_HISTORY_KEY, compact).catch(() => {});
+
       const json = JSON.stringify(compact);
-      try {
-        localStorage.setItem(STORAGE_KEYS.SCAN_HISTORY, json);
-      } catch {
+      if (!this.safeSetLocalStorageWithEviction(STORAGE_KEYS.SCAN_HISTORY, json)) {
         const ultraCompact = capped.map((item) => ({
           id: item.id,
           productId: item.product.id,
@@ -2201,9 +2253,7 @@ class StorageService {
           time: item.time,
           barcode: item.barcode,
         }));
-        try {
-          localStorage.setItem(STORAGE_KEYS.SCAN_HISTORY, JSON.stringify(ultraCompact));
-        } catch {
+        if (!this.safeSetLocalStorageWithEviction(STORAGE_KEYS.SCAN_HISTORY, JSON.stringify(ultraCompact))) {
           try {
             sessionStorage.setItem(STORAGE_KEYS.SCAN_HISTORY, json);
           } catch {}
@@ -2225,18 +2275,24 @@ class StorageService {
 
   saveActiveTemplateId(templateId: string): void {
     if (typeof window === 'undefined') return;
-    try {
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_TEMPLATE, templateId);
-    } catch {}
+    this.safeSetLocalStorageWithEviction(STORAGE_KEYS.ACTIVE_TEMPLATE, templateId);
   }
 
   getUiSessionState(): PersistedUiSessionState {
     const fallback: PersistedUiSessionState = { activeTab: 'catalog', activeModal: 'none' };
     if (typeof window === 'undefined') return fallback;
     try {
-      const raw = sessionStorage.getItem(STORAGE_KEYS.UI_SESSION_STATE);
+      const raw =
+        sessionStorage.getItem(STORAGE_KEYS.UI_SESSION_STATE) ||
+        localStorage.getItem(STORAGE_KEYS.UI_SESSION_STATE);
       if (!raw) return fallback;
       const parsed = JSON.parse(raw);
+      if (
+        typeof parsed?.updatedAt === 'number' &&
+        Date.now() - parsed.updatedAt > UI_SESSION_TTL_MS
+      ) {
+        return fallback;
+      }
       return {
         activeTab: parsed?.activeTab === 'sync_matrix' ? 'sync_matrix' : 'catalog',
         activeModal:
@@ -2249,6 +2305,7 @@ class StorageService {
           parsed?.scannerTab === 'manual'
             ? parsed.scannerTab
             : undefined,
+        updatedAt: typeof parsed?.updatedAt === 'number' ? parsed.updatedAt : undefined,
       };
     } catch {
       return fallback;
@@ -2259,8 +2316,16 @@ class StorageService {
     if (typeof window === 'undefined') return;
     try {
       const current = this.getUiSessionState();
-      const next: PersistedUiSessionState = { ...current, ...partial };
-      sessionStorage.setItem(STORAGE_KEYS.UI_SESSION_STATE, JSON.stringify(next));
+      const next: PersistedUiSessionState = {
+        ...current,
+        ...partial,
+        updatedAt: Date.now(),
+      };
+      const serialized = JSON.stringify(next);
+      try {
+        sessionStorage.setItem(STORAGE_KEYS.UI_SESSION_STATE, serialized);
+      } catch {}
+      this.safeSetLocalStorageWithEviction(STORAGE_KEYS.UI_SESSION_STATE, serialized);
     } catch {}
   }
 }

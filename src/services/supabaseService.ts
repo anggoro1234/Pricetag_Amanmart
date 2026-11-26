@@ -104,6 +104,48 @@ export const idbClearProducts = async (): Promise<boolean> => {
   }
 };
 
+export const idbSaveValue = async <T>(key: string, value: T): Promise<boolean> => {
+  try {
+    const db = await openIdb();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      store.put(value, key);
+      tx.oncomplete = () => {
+        db.close();
+        resolve(true);
+      };
+      tx.onerror = () => {
+        db.close();
+        resolve(false);
+      };
+    });
+  } catch {
+    return false;
+  }
+};
+
+export const idbGetValue = async <T>(key: string): Promise<T | null> => {
+  try {
+    const db = await openIdb();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.get(key);
+      req.onsuccess = () => {
+        db.close();
+        resolve((req.result ?? null) as T | null);
+      };
+      req.onerror = () => {
+        db.close();
+        resolve(null);
+      };
+    });
+  } catch {
+    return null;
+  }
+};
+
 // ============================================================================
 // 1B. Shared Server Catalog Endpoint (/api/catalog) for Cross-Device LAN/Node Sync
 // ============================================================================
