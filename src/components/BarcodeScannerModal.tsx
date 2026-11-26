@@ -92,6 +92,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
   const [autoQueueToBatch, setAutoQueueToBatch] = useState<boolean>(true);
   const [scanSessionHistory, setScanSessionHistory] = useState<ScanSessionItem[]>([]);
+  const [showAllHistory, setShowAllHistory] = useState<boolean>(false);
 
   const totalBatchItems = batchQueue ? batchQueue.length : scanSessionHistory.length;
   const totalBatchLabels = batchQueue
@@ -591,31 +592,31 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     ) : null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden border border-slate-200 flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-1.5 sm:p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden border border-slate-200 flex flex-col max-h-[94dvh] sm:max-h-[90vh]">
         {/* Header */}
-        <div className="px-5 py-4 border-b border-slate-200 bg-slate-900 text-white flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-blue-600/30 border border-blue-400 flex items-center justify-center text-blue-400">
-              <BarcodeIcon className="w-5 h-5" />
+        <div className="shrink-0 px-3.5 sm:px-5 py-3 sm:py-4 border-b border-slate-200 bg-slate-900 text-white flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-blue-600/30 border border-blue-400 flex items-center justify-center text-blue-400 shrink-0">
+              <BarcodeIcon className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
-            <div>
-              <h2 className="text-lg font-bold text-white">Barcode Scanner &amp; Quick Lookup</h2>
-              <p className="text-xs text-slate-400">
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-lg font-bold text-white truncate">Barcode Scanner &amp; Quick Lookup</h2>
+              <p className="text-[11px] sm:text-xs text-slate-400 truncate">
                 Direct camera feed &amp; USB hardware scanner wedge listener
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex overflow-x-auto border-b border-slate-200 bg-slate-50 px-3 sm:px-4 pt-2 gap-1 sm:gap-2">
+        <div className="shrink-0 flex overflow-x-auto border-b border-slate-200 bg-slate-50 px-2.5 sm:px-4 pt-1.5 sm:pt-2 gap-1 sm:gap-2">
           <button
             type="button"
             onClick={() => setActiveTab('usb_wedge')}
@@ -655,7 +656,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="p-5 overflow-y-auto space-y-4 flex-1">
+        <div className="p-3 sm:p-5 overflow-y-auto overscroll-contain space-y-3 sm:space-y-4 flex-1 min-h-0">
           {/* Tab 1: Camera Scanner */}
           {activeTab === 'camera' && (
             <div className="space-y-3">
@@ -810,7 +811,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
               {/* Dedicated Focusable Capture Input (Uncontrolled DOM ref + inputMode="text" default so Android DT338b ScanWedge IME CommitText works reliably) */}
               <div className="bg-white border-2 border-emerald-500 rounded-xl p-3 shadow-xs space-y-2">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-1.5 sm:gap-2">
                   <label
                     htmlFor="pda-capture-input"
                     className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-emerald-700"
@@ -1081,41 +1082,41 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
           {/* Scanned Result Card */}
           {foundProduct ? (
-            <div className="border border-emerald-200 bg-emerald-50/50 rounded-xl p-4 space-y-3">
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2">
+            <div className="border border-emerald-200 bg-emerald-50/50 rounded-xl p-3 sm:p-4 space-y-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
                   <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0" />
-                  <div>
-                    <span className="text-xs font-bold uppercase tracking-wider text-emerald-700">
+                  <div className="min-w-0">
+                    <span className="text-[11px] sm:text-xs font-bold uppercase tracking-wider text-emerald-700">
                       Product Identified
                     </span>
-                    <h4 className="text-sm font-bold text-slate-900 leading-tight">
+                    <h4 className="text-xs sm:text-sm font-bold text-slate-900 leading-tight break-words">
                       {foundProduct.name}
                     </h4>
                   </div>
                 </div>
-                <div className="text-right">
-                  <div className="text-sm font-black text-red-600">
+                <div className="text-right shrink-0">
+                  <div className="text-xs sm:text-sm font-black text-red-600 whitespace-nowrap">
                     {foundProduct.currency} {foundProduct.pricing.unitPrice.toLocaleString('id-ID')}
                   </div>
-                  <div className="text-[10px] text-slate-500">
+                  <div className="text-[10px] text-slate-500 whitespace-nowrap">
                     Stock: {foundProduct.stocks[activeStore.id]?.quantity ?? 0} units
                   </div>
                 </div>
               </div>
 
               {/* Exact Tag Preview */}
-              <div className="flex justify-center p-2 bg-white rounded-lg border border-slate-200 shadow-inner overflow-x-auto">
+              <div className="flex justify-center p-2 bg-white rounded-lg border border-slate-200 shadow-inner overflow-x-auto max-w-full">
                 <LabelPreview
                   product={foundProduct}
                   template={selectedTemplate}
                   store={activeStore}
-                  scale={1.1}
+                  scale={isAndroid ? 0.85 : 1.05}
                 />
               </div>
 
               {/* Quick Actions */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-emerald-200">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-emerald-200">
                 <div className="flex items-center gap-2">
                   <label className="text-xs text-slate-600 font-medium">Quantity:</label>
                   <input
@@ -1128,30 +1129,34 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                   />
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                   <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       if (onAddToBatchQueue) {
                         onAddToBatchQueue(foundProduct, printQty);
                         audioService.playPrintCompleteChime();
                       }
                     }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold transition"
+                    className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3 py-2 sm:py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold transition"
                   >
-                    <Layers className="w-3.5 h-3.5" />
-                    + Tambah ({printQty}) ke Antrean
+                    <Layers className="w-3.5 h-3.5 shrink-0" />
+                    <span>+ Tambah ({printQty}) ke Antrean</span>
                   </button>
 
                   <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       if (onQuickPrint) {
                         onQuickPrint(foundProduct);
                       }
                     }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold transition shadow-sm"
+                    className="flex-1 sm:flex-initial justify-center flex items-center gap-1.5 px-3 py-2 sm:py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold transition shadow-sm"
                   >
-                    <Printer className="w-3.5 h-3.5" />
-                    Print Now
+                    <Printer className="w-3.5 h-3.5 shrink-0" />
+                    <span>Print Now</span>
                   </button>
                 </div>
               </div>
@@ -1201,15 +1206,15 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 )}
               </div>
 
-              <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto pr-1">
-                {scanSessionHistory.map((item) => (
+              <div className="divide-y divide-slate-100 max-h-40 sm:max-h-48 overflow-y-auto overscroll-contain pr-1">
+                {(showAllHistory ? scanSessionHistory : scanSessionHistory.slice(0, 50)).map((item) => (
                   <div
                     key={item.id}
                     className="flex items-center justify-between py-2 text-xs gap-3"
                   >
                     <div className="min-w-0 flex-1">
                       <p className="font-bold text-slate-900 truncate">{item.product.name}</p>
-                      <p className="text-[11px] font-mono text-slate-500">
+                      <p className="text-[11px] font-mono text-slate-500 truncate">
                         {item.barcode} • SKU: {item.product.sku} • Rp{' '}
                         {item.product.pricing.unitPrice.toLocaleString('id-ID')}
                       </p>
@@ -1223,42 +1228,57 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                   </div>
                 ))}
               </div>
+              {scanSessionHistory.length > 50 && (
+                <div className="pt-1 flex justify-center">
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => setShowAllHistory((prev) => !prev)}
+                    className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-900 underline"
+                  >
+                    {showAllHistory
+                      ? 'Tampilkan 50 scan terbaru saja'
+                      : `Tampilkan semua ${scanSessionHistory.length} item yang discan`}
+                  </button>
+                </div>
+              )}
             </div>
           )}
-
-          {catalogSyncBanner}
 
           {catalogSyncBanner}
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
-          <div className="flex items-center gap-3">
-            <div>
+        <div className="shrink-0 px-3 sm:px-5 py-2.5 sm:py-3 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 z-10">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <div className="truncate">
               Active Store:{' '}
               <span className="font-semibold text-slate-700">{activeStore.name}</span>
             </div>
             {totalBatchItems > 0 && (
-              <span className="inline-flex items-center gap-1 text-emerald-700 font-bold bg-emerald-100 border border-emerald-200 px-2.5 py-0.5 rounded-full">
-                <Check className="w-3 h-3 text-emerald-600" />
+              <span className="inline-flex items-center gap-1 text-emerald-700 font-bold bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded-full whitespace-nowrap">
+                <Check className="w-3 h-3 text-emerald-600 shrink-0" />
                 {totalBatchLabels} Label di Antrean
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
             {onOpenBatchPrint && totalBatchItems > 0 && (
               <button
                 type="button"
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={onOpenBatchPrint}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition shadow-xs"
+                className="flex-1 sm:flex-initial justify-center inline-flex items-center gap-1.5 px-3.5 py-2 sm:py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition shadow-xs whitespace-nowrap"
               >
-                <Layers className="w-3.5 h-3.5" />
+                <Layers className="w-3.5 h-3.5 shrink-0" />
                 <span>Buka Batch Print ({totalBatchItems})</span>
               </button>
             )}
             <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
               onClick={onClose}
-              className="px-4 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold rounded-lg transition"
+              className="px-4 py-2 sm:py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold rounded-lg transition shrink-0"
             >
               Done
             </button>

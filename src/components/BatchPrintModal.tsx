@@ -225,42 +225,43 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-7xl overflow-hidden border border-slate-200 flex flex-col max-h-[94vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-1.5 sm:p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-7xl overflow-hidden border border-slate-200 flex flex-col max-h-[95dvh] sm:max-h-[94vh]">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-200 bg-slate-900 text-white flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-red-500/20 border border-red-400 flex items-center justify-center text-red-400">
-              <Layers className="w-5 h-5" />
+        <div className="shrink-0 px-3.5 sm:px-6 py-2.5 sm:py-4 border-b border-slate-200 bg-slate-900 text-white flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-red-500/20 border border-red-400 flex items-center justify-center text-red-400 shrink-0">
+              <Layers className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-lg font-bold text-white">Printing Multi</h2>
-                <span className="bg-red-500/20 text-red-400 text-xs px-2.5 py-0.5 rounded-full font-bold border border-red-500/30">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                <h2 className="text-base sm:text-lg font-bold text-white">Printing Multi</h2>
+                <span className="bg-red-500/20 text-red-400 text-[11px] sm:text-xs px-2 sm:px-2.5 py-0.5 rounded-full font-bold border border-red-500/30">
                   {totalLabels} Labels ({queue.length} Products)
                 </span>
                 {activeBatchCategories.length > 0 && (
-                  <span className="bg-emerald-500/20 text-emerald-300 text-xs px-2.5 py-0.5 rounded-full font-bold border border-emerald-500/30">
+                  <span className="hidden sm:inline-block bg-emerald-500/20 text-emerald-300 text-xs px-2.5 py-0.5 rounded-full font-bold border border-emerald-500/30">
                     {activeBatchCategories.length} Categories: {activeBatchCategories.join(' + ')}
                   </span>
                 )}
-                <span className="bg-blue-500/20 text-blue-300 text-xs px-2.5 py-0.5 rounded-full font-mono font-bold border border-blue-500/30">
+                <span className="hidden md:inline-block bg-blue-500/20 text-blue-300 text-xs px-2.5 py-0.5 rounded-full font-mono font-bold border border-blue-500/30">
                   Live Print Date: {livePrintDateStr}
                 </span>
               </div>
-              <p className="text-xs text-slate-400">
+              <p className="hidden sm:block text-xs text-slate-400">
                 Pilih berbagai kategori produk atau Drag &amp; Drop produk ke antrean untuk cetak multi-kategori &amp; multi-barcode sekaligus
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
               onClick={() => setShowRawCommands(!showRawCommands)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition"
+              className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] sm:text-xs font-semibold rounded-lg transition"
             >
-              <FileCode className="w-3.5 h-3.5" />
-              {showRawCommands ? 'Hide TSPL' : 'Raw TSPL / ESC-POS'}
+              <FileCode className="w-3.5 h-3.5 shrink-0" />
+              <span className="hidden sm:inline">{showRawCommands ? 'Hide TSPL' : 'Raw TSPL / ESC-POS'}</span>
+              <span className="sm:hidden">{showRawCommands ? 'Hide' : 'TSPL'}</span>
             </button>
             <button
               onClick={onClose}
@@ -272,7 +273,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         </div>
 
         {/* Toolbar Controls */}
-        <div className="px-6 py-3 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="shrink-0 px-3 sm:px-6 py-2 sm:py-3 max-h-28 sm:max-h-none overflow-y-auto border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2 sm:gap-3 text-xs">
           {/* Template Selector */}
           <div className="flex items-center gap-2">
             <span className="font-bold text-slate-600">Template:</span>
@@ -365,9 +366,9 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         </div>
 
         {/* Modal Main Content: 3-Column Layout (1: Catalog/Category Picker, 2: Active Batch Queue, 3: Live Print Preview) */}
-        <div className="flex-1 overflow-y-auto lg:overflow-hidden flex flex-col lg:flex-row">
+        <div className="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden overscroll-contain flex flex-col lg:flex-row">
           {/* Column 1: Multi-Category Product Picker (Drag & Drop Source) */}
-          <div className="w-full lg:w-64 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white flex flex-col overflow-hidden max-h-60 lg:max-h-none flex-shrink-0">
+          <div className="w-full lg:w-64 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white flex flex-col overflow-hidden max-h-48 lg:max-h-none flex-shrink-0">
             <div className="p-3 border-b border-slate-200 bg-emerald-50/60 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="font-bold text-xs text-emerald-900 uppercase tracking-wider flex items-center gap-1.5">
@@ -515,16 +516,16 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
             onDragOver={handleDragOverZone}
             onDragLeave={handleDragLeaveZone}
             onDrop={handleDropProductOnZone}
-            className={`w-full lg:w-60 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col overflow-hidden max-h-56 lg:max-h-none flex-shrink-0 transition-colors ${
+            className={`w-full lg:w-60 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col overflow-hidden max-h-48 lg:max-h-none flex-shrink-0 transition-colors ${
               isDragOverStage ? 'bg-emerald-50/80 border-emerald-400' : 'bg-slate-50/50'
             }`}
           >
-            <div className="p-3 border-b border-slate-200 font-bold text-xs text-slate-600 uppercase tracking-wider flex justify-between items-center">
+            <div className="shrink-0 p-2.5 sm:p-3 border-b border-slate-200 font-bold text-xs text-slate-600 uppercase tracking-wider flex justify-between items-center">
               <span>Items in Batch ({queue.length})</span>
               <span className="text-slate-400">{totalLabels} total</span>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-2.5 sm:p-3 space-y-2">
               {queue.length === 0 ? (
                 <div className="p-6 text-center text-slate-400 text-xs border-2 border-dashed border-slate-300 rounded-xl">
                   Antrean kosong. Pilih atau <strong>Drag &amp; Drop</strong> produk (misal: Indomie &amp; Kecap/Saus) dari panel kiri ke sini.
@@ -599,7 +600,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
             onDragOver={handleDragOverZone}
             onDragLeave={handleDragLeaveZone}
             onDrop={handleDropProductOnZone}
-            className={`flex-1 overflow-auto p-4 flex flex-col items-center transition-colors ${
+            className={`flex-none lg:flex-1 min-h-[260px] lg:min-h-0 overflow-auto p-3 sm:p-4 flex flex-col items-center transition-colors ${
               isDragOverStage ? 'bg-emerald-50/70 ring-2 ring-inset ring-emerald-400' : 'bg-slate-100'
             }`}
           >
@@ -631,30 +632,30 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                 {/* Printable container targeted by Thermal Print Service */}
                 <div
                   id="batch-printable-labels-area"
-                  className={`bg-white p-3 rounded-xl shadow-md border transition-all w-full max-w-[860px] ${
+                  className={`bg-white p-2.5 sm:p-3 rounded-xl shadow-md border transition-all w-full max-w-[860px] ${
                     isDragOverStage
                       ? 'border-emerald-500 border-2 ring-4 ring-emerald-500/10'
                       : 'border-slate-300'
                   } ${
                     layoutMode === 'side_by_side'
-                      ? 'grid grid-cols-3 gap-2 justify-items-stretch items-start'
+                      ? 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 justify-items-center items-start'
                       : layoutMode === 'single_roll'
                       ? 'flex flex-col gap-3 items-center max-w-xs'
-                      : 'grid grid-cols-3 gap-2 p-3 border-dashed border-2 border-slate-400 justify-items-stretch items-start'
+                      : 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 p-2.5 sm:p-3 border-dashed border-2 border-slate-400 justify-items-center items-start'
                   }`}
                 >
                   {flattenedLabels.length === 0 ? (
-                    <div className="col-span-3 py-12 px-8 text-center text-slate-400 text-sm">
+                    <div className="col-span-full py-12 px-4 sm:px-8 text-center text-slate-400 text-sm">
                       Belum ada label untuk dicetak. Drag &amp; Drop produk dari daftar kategori di sebelah kiri ke area ini.
                     </div>
                   ) : (
                     flattenedLabels.map(({ item, copyIndex }, idx) => (
-                      <div key={`${item.id}-${copyIndex}-${idx}`} className="flex flex-col items-center w-full">
+                      <div key={`${item.id}-${copyIndex}-${idx}`} className="flex flex-col items-center w-full max-w-full overflow-x-auto">
                         <LabelPreview
                           product={item.product}
                           template={currentTemplate}
                           store={activeStore}
-                          scale={layoutMode === 'single_roll' ? 1.05 : Math.min(1.05, 0.92 * printSizeScale)}
+                          scale={layoutMode === 'single_roll' ? 1.0 : Math.min(1.0, 0.9 * printSizeScale)}
                           className="w-full"
                           isPrintMode={false}
                         />
@@ -676,8 +677,8 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         </div>
 
         {/* Footer Actions */}
-        <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between">
-          <div className="text-xs text-slate-500">
+        <div className="shrink-0 px-3 sm:px-6 py-2.5 sm:py-4 border-t border-slate-200 bg-slate-50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 z-20">
+          <div className="text-[11px] sm:text-xs text-slate-500 truncate">
             Destination:{' '}
             <span className="font-semibold text-slate-800">
               {printerSettings.connectionType === 'browser_print'
@@ -686,10 +687,10 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
             </span>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto justify-end">
             <button
               onClick={onClose}
-              className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold rounded-xl text-xs transition"
+              className="px-3.5 sm:px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold rounded-xl text-xs transition shrink-0"
             >
               Close
             </button>
@@ -697,10 +698,10 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
             <button
               onClick={handleExecutePrint}
               disabled={flattenedLabels.length === 0 || isPrinting}
-              className="flex items-center gap-2 px-6 py-2.5 bg-red-600 hover:bg-red-700 disabled:bg-slate-300 text-white font-bold rounded-xl text-sm shadow-md transition"
+              className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-4 sm:px-6 py-2.5 bg-red-600 hover:bg-red-700 disabled:bg-slate-300 text-white font-bold rounded-xl text-xs sm:text-sm shadow-md transition whitespace-nowrap"
             >
-              <Printer className="w-4 h-4" />
-              {isPrinting ? 'Printing Labels...' : `Print All ${totalLabels} Labels`}
+              <Printer className="w-4 h-4 shrink-0" />
+              <span>{isPrinting ? 'Printing Labels...' : `Print All ${totalLabels} Labels`}</span>
             </button>
           </div>
         </div>
